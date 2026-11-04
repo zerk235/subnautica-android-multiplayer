@@ -10,6 +10,11 @@ This is a public preview demo. The Android installer passed a clean game install
 
 **[Download installer 0.2 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.2.0-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.2.0-installer-preview)
 
+**November 4 update:** the APK now fixes synchronization of saved base pieces
+after re-entering a world. Update SN Multiplayer Installer over the existing app,
+save your game and return to its main menu, then run **Prepare mod → Install
+prepared mod** on both phones. Keep the installer's data: it holds your update key.
+
 Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
 its resources. The installer runs on the phone without a PC or root and does not
 contain or download the game.
