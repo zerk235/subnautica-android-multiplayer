@@ -93,6 +93,25 @@ base_geometry::GhostEnvelope geometry(const WorldEvent& e,int d) {
     return base_geometry::face_descriptor(g,{2,0,3},d,e.tech_type);
 }
 int main() {
+    for(int tech:{5501,5505,5514,5540}) {
+        reset();auto loaded=event(tech,"loaded");loaded.kind=kWorldEventRemove;
+        const int direction=tech==5540 ? 4 : 0;
+        auto saved=geometry(loaded,direction);
+        candidate.recipe=tech;candidate.face.direction=direction;
+        current=base_geometry::face_type_for_tech(tech);
+        build_synced_corridor(loaded.object_id,true)->removed=true;
+        candidate.allowed=false;
+        assert(!build_apply_hatch(&target_token,loaded,saved)&&writes==0);
+        assert(build_synced_corridor(loaded.object_id)->state.tech_type==0);
+        candidate.allowed=true;
+        assert(build_apply_hatch(&target_token,loaded,saved)&&writes==1&&current==1);
+        assert(build_corridor_removed(loaded.object_id));
+        assert(build_apply_hatch(&target_token,loaded,saved)&&writes==1);
+        auto replacement=event(tech,"replacement");
+        assert(build_apply_hatch(&target_token,replacement,geometry(replacement,direction)));
+        const auto before=writes;
+        assert(build_apply_hatch(&target_token,loaded,saved)&&writes==before);
+    }
     for (int tech:{5501,5505,5514,5540}) for (int direction=0;direction<6;++direction) {
         if (tech==5540 && direction!=4) continue;
         reset();auto e=event(tech);auto g=geometry(e,direction);

@@ -22,6 +22,31 @@ SyncedCorridor* build_synced_corridor(const char* id, bool allocate = false) {
     return nullptr;
 }
 
+// A loaded Base has no temporary ConstructableBase and therefore no placement
+// record in this process. An explicit demolition may bind that missing record,
+// but only AFTER the receiver verifies the exact native handle and game rules.
+// Never reinterpret an existing, different record as a saved object.
+bool build_removal_identity_matches(const WorldEvent& state,const base_geometry::GhostEnvelope& geometry) {
+    if (state.kind!=kWorldEventRemove || geometry.object_id!=state.object_id) return false;
+    const auto* entry=build_synced_corridor(state.object_id);
+    if (!entry || (entry->state.tech_type==0 && entry->geometry.object_id.empty())) return true;
+    return entry->state.tech_type==state.tech_type &&
+        entry->geometry.object_id==state.object_id &&
+        base_geometry::same_corridor_cell(entry->geometry,geometry) &&
+        entry->state.geometry_hash_low==state.geometry_hash_low &&
+        entry->state.geometry_hash_high==state.geometry_hash_high;
+}
+
+bool build_bind_removal_identity(const WorldEvent& state,const base_geometry::GhostEnvelope& geometry) {
+    if (!build_removal_identity_matches(state,geometry)) return false;
+    auto* entry=build_synced_corridor(state.object_id,true);
+    if (!entry) return false;
+    entry->state=state;
+    entry->geometry=geometry;
+    entry->removed=true;
+    return true;
+}
+
 bool build_corridor_removed(const char* id) {
     auto* entry = build_synced_corridor(id);
     return entry && entry->removed;

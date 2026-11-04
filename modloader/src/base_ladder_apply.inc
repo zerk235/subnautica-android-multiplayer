@@ -31,13 +31,12 @@ bool build_apply_ladder_inner(void* target,const WorldEvent& e,const base_geomet
     if (!g_ladder_capture.exit_cell.call(target,lower.cell,4,&exit,g_ladder_capture.exit_cell.method) ||
         exit.x!=upper.cell.x || exit.y!=upper.cell.y || exit.z!=upper.cell.z) return false;
     if (remove) {
-        auto* identity=build_synced_corridor(e.object_id);
-        if (!identity || identity->state.tech_type!=5504 || !base_geometry::same_ladder(identity->geometry,g) ||
-            identity->state.geometry_hash_low!=e.geometry_hash_low || identity->state.geometry_hash_high!=e.geometry_hash_high ||
+        if (!build_removal_identity_matches(e,g) ||
             build_ladder_has_replacement(g,e.object_id) || !build_ladder_readback(target,g,h,false)) return true;
         // The game can expose the deconstructor at either end of the same ladder.
         if (!build_hatch_removal_allowed(target,lower,5504) &&
             !build_hatch_removal_allowed(target,upper,5504)) return false;
+        if (!build_bind_removal_identity(e,g)) return true;
     } else {
         if (build_corridor_removed(e.object_id) || build_corridor_record(e,false)) return true;
         HatchFace actual{};

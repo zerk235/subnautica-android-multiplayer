@@ -61,16 +61,13 @@ bool build_apply_hatch_inner(void* target,const WorldEvent& e,const base_geometr
     // A dome may arrive before its room's async prefab placement. Retry only
     // before mutation; never write roof topology into an absent/foreign room.
     if (e.tech_type==5540 && !build_dome_owner_present(target,geometry)) return remove;
-    auto* identity=build_synced_corridor(e.object_id);
     const uint8_t current=g_hatch_capture.get_face.call(target,face,g_hatch_capture.get_face.method);
     if (remove) {
-        if (!identity || identity->state.tech_type!=e.tech_type ||
-            !base_geometry::same_structural_face(identity->geometry,geometry) ||
-            identity->state.geometry_hash_low!=e.geometry_hash_low ||
-            identity->state.geometry_hash_high!=e.geometry_hash_high) return true;
+        if (!build_removal_identity_matches(e,geometry)) return true;
         if (build_face_has_replacement(geometry,e.object_id)) return true;
         if (current!=face_type) return true;
         if (!build_hatch_removal_allowed(target,face,e.tech_type)) return false;
+        if (!build_bind_removal_identity(e,geometry)) return true;
     } else {
         if (build_corridor_removed(e.object_id) || build_corridor_record(e,false)) return true;
         if ((current!=0 && current!=1) || (e.tech_type==5540 && current!=1)) {

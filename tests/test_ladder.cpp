@@ -162,6 +162,21 @@ int main(){
         e.kind=kWorldEventBuild;assert(build_apply_ladder(&target_token,e,g)&&writes==h);
     }
     reset();auto e=event();auto g=geometry(e);
+    // Native ladder from disk; discard temporary session records as on reload.
+    assert(build_apply_ladder(&target_token,e,g));
+    for(auto& entry:g_synced_corridors)entry=SyncedCorridor{};
+    records.clear();e.kind=kWorldEventRemove;
+    build_synced_corridor(e.object_id,true)->removed=true;
+    permission=false;
+    assert(!build_apply_ladder(&target_token,e,g)&&clears==0);
+    assert(build_synced_corridor(e.object_id)->state.tech_type==0);
+    permission=true;
+    assert(build_apply_ladder(&target_token,e,g)&&clears==1);
+    assert(build_corridor_removed(e.object_id));
+    auto replacement=event("saved-replacement");
+    assert(build_apply_ladder(&target_token,replacement,geometry(replacement)));
+    assert(build_apply_ladder(&target_token,e,g)&&clears==1);
+    reset();e=event();g=geometry(e);
     auto malformed=g;malformed.geometry.faces[6]=1;assert(!base_geometry::ladder_height(malformed));
     malformed=g;malformed.geometry.masks[1]=16;assert(!base_geometry::ladder_height(malformed));
     malformed=g;malformed.geometry.cells[0]=4;assert(!base_geometry::ladder_height(malformed));

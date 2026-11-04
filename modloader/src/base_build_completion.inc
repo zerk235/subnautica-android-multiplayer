@@ -173,10 +173,22 @@ void* build_final_deconstruction(void* self, void* method) {
                 if (!base_geometry::supported_existing_piece(geometry,demolition.tech_type)) return false;
             }
             auto* identity = demolition.tech_type==5504 ? build_synced_ladder(geometry) : base_geometry::face_type_for_tech(demolition.tech_type)>=0 ? build_synced_face(geometry) : build_synced_cell(geometry);
-            if (!identity || identity->state.tech_type != demolition.tech_type) {
-                LOG_WARN("build: deconstruction not shared: cell has no unambiguous session build identity");
-                return false;
+            if (!identity) {
+                // Saved geometry survives reloading; its session-only placement
+                // record does not. Capture the game's explicit demolition ghost
+                // rather than requiring the user to rebuild this saved piece.
+                const bool replaced=demolition.tech_type==5504 ? build_ladder_has_replacement(geometry,demolition.object_id) :
+                    base_geometry::face_type_for_tech(demolition.tech_type)>=0 ? build_face_has_replacement(geometry,demolition.object_id) :
+                    build_cell_has_replacement(geometry,demolition.object_id);
+                if (replaced) { LOG_WARN("build: saved deconstruction refused: ambiguous/replaced geometry"); return false; }
+                state=demolition;
+                geometry.object_id=state.object_id;
+                void* class_text=g_build_class_id.call(state.tech_type,g_build_class_id.method);
+                if (!build_class_bytes(class_text,state.class_id)) return false;
+                LOG_INFO("build: saved deconstruction captured id=%s target=%s tech=%d",state.object_id,geometry.target_base_id.c_str(),state.tech_type);
+                return true;
             }
+            if (identity->state.tech_type != demolition.tech_type) return false;
             state = identity->state;
             geometry = identity->geometry; // send the exact original snapshot/identity
             return true;
