@@ -4,7 +4,7 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-The project is being prepared for its first public demo. A public installer is **not available yet**. This repository contains native mod source, tests and developer tools, not the game or a prepatched game APK.
+The project is being prepared for its first public demo. An on-device Android installer is in preview testing; end-to-end game installation and launch acceptance is **not complete yet**. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Current scope
 
@@ -20,5 +20,7 @@ The host must save the world before the guest joins. For the initial demo test, 
 See the Russian [play guide](docs/PLAYING.md), [compatibility matrix](docs/COMPATIBILITY.md), [build instructions](docs/BUILDING.md) and [demo roadmap](docs/ROADMAP.md).
 
 The developer patch tool creates an **unsigned** APK from a local game APK; it does not sign or install it. Signing and split-package compatibility must be handled separately. Do not uninstall the game to resolve a signing mismatch without first backing up your saves.
+
+The Android installer generates a local non-exportable signing key, prepares a signed package on the phone and blocks replacement when the installed game's certificate differs. It never uninstalls the game automatically. Keep the installer and its app data to retain the signing key for future updates.
 
 No open-source license has been selected for project-owned code; see [LICENSE.md](LICENSE.md). Third-party components retain their own licenses. This unofficial project is not affiliated with the game's developers.

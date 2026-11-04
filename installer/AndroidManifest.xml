@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.zerk235.snmp.installer" android:versionCode="1" android:versionName="0.1.0-preview">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="29" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <queries><package android:name="com.unknownworlds.subnautica" /></queries>
+    <application android:label="SN Multiplayer Installer" android:theme="@android:style/Theme.Material.NoActionBar"
+        android:allowBackup="false" android:supportsRtl="true" android:usesCleartextTraffic="false">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service android:name=".PatchService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <receiver android:name=".InstallReceiver" android:exported="false" />
+    </application>
+</manifest>
