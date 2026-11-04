@@ -1,0 +1,33 @@
+name: Ошибка / Bug report
+description: Ошибка подключения, переноса мира или синхронизации
+title: "[Bug] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "Не прикладывайте APK, ресурсы игры, ключи или пароли. Проверьте логи на личные данные."
+  - type: input
+    id: versions
+    attributes:
+      label: Версия игры и идентификатор сборки мода
+    validations:
+      required: true
+  - type: textarea
+    id: devices
+    attributes:
+      label: Устройства и сеть
+      description: Модели, версии Android, кто хост, Wi-Fi или точка доступа; без серийных номеров и IP.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Как воспроизвести
+      description: Шаги, ожидаемый и фактический результат. Для базы — тип детали, стыковка, повторная постройка.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи обоих телефонов и скриншоты
+      description: Перетащите очищенные файлы или вставьте небольшой фрагмент.
