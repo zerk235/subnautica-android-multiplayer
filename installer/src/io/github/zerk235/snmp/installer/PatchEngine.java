@@ -30,6 +30,10 @@ final class PatchEngine {
         try { return context.getPackageManager().getPackageInfo(GAME, PackageManager.GET_SIGNING_CERTIFICATES); }
         catch (PackageManager.NameNotFoundException e) { return null; }
     }
+    PackageInfo retained() throws Exception {
+        try { return context.getPackageManager().getPackageInfo(GAME,PackageManager.GET_SIGNING_CERTIFICATES|PackageManager.MATCH_UNINSTALLED_PACKAGES); }
+        catch(PackageManager.NameNotFoundException error) { return null; }
+    }
 
     static String certificate(PackageInfo info) throws Exception {
         if (info == null || info.signingInfo == null || info.signingInfo.hasMultipleSigners())
@@ -121,9 +125,14 @@ final class PatchEngine {
     String installBlocker(JSONObject plan) throws Exception {
         if (plan == null) return "Сначала подготовьте мод";
         PackageInfo current = installed();
-        if (current == null) return plan.getBoolean("full") ? null : "Нужна установленная игра: этот пакет содержит только обновление";
+        if (current == null) {
+            PackageInfo other=retained();
+            if(other!=null && !certificate(other).equals(plan.getString("cert")))
+                return "Subnautica отсутствует в текущем профиле, но её пакет остался в другом профиле Android или клоне с другой подписью. Установка новой подписи заблокирована. Не удаляйте другие профили и их миры: сначала верните существующую игру в текущий профиль и восстановите копию миров.";
+            return plan.getBoolean("full") ? null : "Нужна установленная игра: этот пакет содержит только обновление";
+        }
         if (!certificate(current).equals(plan.getString("cert")))
-            return "Подпись установленной игры отличается. Обновление поверх неё невозможно. Сначала сделайте проверенную резервную копию миров. После ручного удаления игры вернитесь сюда: подготовленные APK останутся в установщике. Установщик сам игру не удаляет.";
+            return "Подпись установленной игры отличается. Для замены подключите Shizuku, создайте копию миров и нажмите «Удалить старую игру». Перед системным запросом установщик проверит актуальность копии и APK. Затем установите мод и восстановите миры. Не удаляйте игру вручную без проверенной копии.";
         if (current.getLongVersionCode() != plan.getLong("versionCode") || !GAME_VERSION.equals(current.versionName))
             return "Версия установленной игры изменилась. Подготовьте мод заново";
         return null;

@@ -54,7 +54,7 @@ public final class InstallerTests extends Instrumentation {
             // Sign a genuine tiny Android APK (this installer) to exercise apksig on ART.
             File own=new File(context.getApplicationInfo().sourceDir), unsigned=new File(dir,"own-unsigned.apk"), signed=new File(dir,"own-signed.apk");
             ApkIdentity ownIdentity=ApkIdentity.read(own);
-            check(context.getPackageName().equals(ownIdentity.packageName) && ownIdentity.versionCode==1 && ownIdentity.split==null,"binary manifest");
+            check(context.getPackageName().equals(ownIdentity.packageName) && ownIdentity.versionCode==2 && ownIdentity.split==null,"binary manifest");
             refused=false; try { ApkIdentity.parse(new byte[64]); } catch(IOException expected) { refused=true; } check(refused,"manifest bounds");
             ApkPatcher.rewrite(own,unsigned,null,progress); signer.sign(unsigned,signed); signer.verify(signed);
             if (options != null && "sessions".equals(options.getString("mode",""))) testSessions(context,dir,signer,progress);

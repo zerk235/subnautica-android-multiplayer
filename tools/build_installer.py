@@ -12,6 +12,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 from build import source_build_id
+from fetch_installer_dependencies import jars as shizuku_jars
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = "{http://schemas.android.com/apk/res/android}"
@@ -31,6 +32,7 @@ def main():
     if not args.sdk or not args.java_home:
         parser.error("Pass --sdk and --java-home, or set ANDROID_HOME and JAVA_HOME")
     sdk, java = args.sdk.resolve(), args.java_home.resolve()
+    shizuku = shizuku_jars()
     bt = sdk / "build-tools" / args.build_tools
     android = sdk / "platforms" / args.platform / "android.jar"
     suffix = ".exe" if os.name == "nt" else ""
@@ -58,6 +60,9 @@ def main():
         ET.SubElement(manifest.getroot(), "instrumentation", {
             ANDROID + "name": "io.github.zerk235.snmp.installer.InstallerTests",
             ANDROID + "targetPackage": "io.github.zerk235.snmp.installer"})
+        ET.SubElement(manifest.getroot(), "instrumentation", {
+            ANDROID + "name": "io.github.zerk235.snmp.installer.SaveTests",
+            ANDROID + "targetPackage": "io.github.zerk235.snmp.installer"})
     manifest.write(out / "AndroidManifest.xml", encoding="utf-8", xml_declaration=True)
     shutil.copyfile(library, out / "assets/libsnmod.so")
     (out / "assets/mod.json").write_text(json.dumps({"buildId": identity, "sha256": hashlib.sha256(library.read_bytes()).hexdigest(), "protocol": 23}), encoding="utf-8")
@@ -75,6 +80,7 @@ def main():
         notices.append("bsd/" + name + "\n" + text[:text.index("*/")+2])
     (out / "assets/ShadowHook-third-party-LICENSES.txt").write_text("\n\n".join(notices), encoding="utf-8")
     shutil.copyfile(bt / "NOTICE.txt", out / "assets/Android-SDK-NOTICE.txt")
+    shutil.copyfile(ROOT / "installer/licenses/Shizuku-API-LICENSE.txt", out / "assets/Shizuku-API-LICENSE.txt")
     if args.test:
         fixture_dir = out / "fixture"
         fixture_dir.mkdir(exist_ok=True)
@@ -116,7 +122,7 @@ def main():
                 dst.writestr(info, src.read(info))
     sources = sorted((ROOT / "installer/src").rglob("*.java"))
     if args.test: sources += sorted((ROOT / "installer/tests").glob("*.java"))
-    classpath = os.pathsep.join((str(android), str(dep)))
+    classpath = os.pathsep.join(map(str,(android,dep,*shizuku)))
     subprocess.run([str(javac), "-encoding", "UTF-8", "-source", "8", "-target", "8",
                     "-classpath", classpath, "-d", str(out / "classes"), *map(str, sources)], check=True)
     classes = out / "app.jar"
@@ -125,7 +131,7 @@ def main():
             z.write(file, file.relative_to(out / "classes").as_posix())
     subprocess.run([str(java_bin), "-cp", str(bt / "lib/d8.jar"), "com.android.tools.r8.D8",
                     "--min-api", "29", "--lib", str(android), "--output", str(out / "dex"),
-                    str(classes), str(dep)], check=True)
+                    str(classes), str(dep), *map(str,shizuku)], check=True)
     unsigned = out / "installer.unsigned.apk"
     subprocess.run([str(bt / ("aapt2" + suffix)), "link", "-I", str(android), "--manifest", str(out / "AndroidManifest.xml"),
                     "-A", str(out / "assets"), "-o", str(unsigned)], check=True)

@@ -17,7 +17,11 @@ public final class InstallReceiver extends BroadcastReceiver {
             }
         } else if (status == PackageInstaller.STATUS_SUCCESS) {
             context.getSharedPreferences("status", 0).edit().remove("session").apply();
-            PatchService.status(context, "Мод установлен. Можно запускать игру и подключаться в одной Wi-Fi сети.");
+            try {
+                PatchService.status(context,new SaveManager(context).needsRestore()
+                    ? "Мод установлен. Теперь нажмите «Восстановить миры», прежде чем открывать игру."
+                    : "Мод установлен. Можно запускать игру и подключаться в одной Wi-Fi сети.");
+            } catch(Exception error) { PatchService.status(context,"Мод установлен. Проверьте резервную копию миров перед запуском: "+error.getMessage()); }
         } else {
             context.getSharedPreferences("status", 0).edit().remove("session").apply();
             PatchService.status(context, "Установка не завершена (" + status + "): " + result.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)

@@ -1,13 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.github.zerk235.snmp.installer" android:versionCode="1" android:versionName="0.1.0-preview">
+    package="io.github.zerk235.snmp.installer" android:versionCode="2" android:versionName="0.2.0-preview">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="29" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <queries><package android:name="com.unknownworlds.subnautica" /></queries>
+    <queries><package android:name="com.unknownworlds.subnautica" /><package android:name="moe.shizuku.privileged.api" /></queries>
     <application android:label="SN Multiplayer Installer" android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false" android:supportsRtl="true" android:usesCleartextTraffic="false">
+        <meta-data android:name="moe.shizuku.client.V3_SUPPORT" android:value="true" />
+        <provider android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="io.github.zerk235.snmp.installer.shizuku"
+            android:multiprocess="false" android:enabled="true" android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -16,5 +23,8 @@
         </activity>
         <service android:name=".PatchService" android:exported="false" android:foregroundServiceType="dataSync" />
         <receiver android:name=".InstallReceiver" android:exported="false" />
+        <receiver android:name=".GamePackageReceiver" android:exported="false">
+            <intent-filter><action android:name="android.intent.action.PACKAGE_REMOVED" /><data android:scheme="package" /></intent-filter>
+        </receiver>
     </application>
 </manifest>
