@@ -4,7 +4,30 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-The project is being prepared for its first public demo. The preview Android installer passed a clean game installation, Unity launch and a two-phone LAN session. It does not automatically back up worlds before a signing-key change. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
+This is a public preview demo. The Android installer passed a clean game installation, Unity launch and a two-phone LAN session. It does not automatically back up worlds before a signing-key change. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
+
+## Download and install
+
+**[Download installer APK — about 1.6 MB](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.1.0-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.1.0-installer-preview)
+
+Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
+its resources. The installer runs on the phone without a PC or root and does not
+contain or download the game.
+
+**“Подготовить мод” (Prepare mod)** copies the installed game APKs into the
+installer's own storage, patches, signs and verifies them. It does not install
+the result, uninstall the game, or copy worlds, progress or game settings.
+
+For a first signing-key change: back up important saves, complete preparation,
+uninstall **Subnautica only** using Android's normal app menu, return to the
+installer and choose **“Установить подготовленный мод” (Install prepared mod)**.
+The prepared APKs remain in the separate installer app. Uninstalling the game
+can erase its saves; do not proceed without a verified backup if you need them.
+If you accept losing old progress, a fresh installation is possible.
+
+**Keep SN Multiplayer Installer and its app data**: they hold the prepared files
+and the local key needed for future updates. Full steps are in the
+[installer guide](docs/INSTALLER.md).
 
 ## Current scope
 
