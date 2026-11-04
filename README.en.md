@@ -4,7 +4,7 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-The project is being prepared for its first public demo. An on-device Android installer is in preview testing; end-to-end game installation and launch acceptance is **not complete yet**. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
+The project is being prepared for its first public demo. The preview Android installer passed a clean game installation, Unity launch and a two-phone LAN session. It does not automatically back up worlds before a signing-key change. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Current scope
 
