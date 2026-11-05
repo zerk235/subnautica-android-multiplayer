@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #define LOG_WARN(...) ((void)0)
@@ -34,6 +35,9 @@ int main() {
     assert(visual_hand_anchor(&model,nullptr,&local_player_grip)==&model);
     assert(select_visual_grip(&model,&grip,&wrist,1)==&wrist);
     assert(select_visual_grip(&model,&grip,&wrist,0)==&grip);
+    assert(select_visual_grip(&model,&grip,&wrist,0,751)==&wrist);
+    assert(select_visual_grip(&model,&grip,&local_player_grip,0,751)==&grip);
+    assert(select_visual_grip(&model,&grip,nullptr,0,751)==&grip);
     assert(select_visual_grip(&model,nullptr,&wrist,1)==&wrist);
     assert(select_visual_grip(&model,nullptr,nullptr,0)==&model);
     assert(select_visual_grip(&model,&local_player_grip,nullptr,0)==nullptr);

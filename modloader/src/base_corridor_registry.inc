@@ -3,6 +3,9 @@
 struct SyncedCorridor {
     bool used = false;
     bool removed = false;
+    bool removal_applied = false;
+    bool root_pose_valid = false;
+    std::array<float,7> root_pose{};
     WorldEvent state{};
     base_geometry::GhostEnvelope geometry;
 };
@@ -50,6 +53,12 @@ bool build_bind_removal_identity(const WorldEvent& state,const base_geometry::Gh
 bool build_corridor_removed(const char* id) {
     auto* entry = build_synced_corridor(id);
     return entry && entry->removed;
+}
+
+bool build_base_birth_known(const std::string& id) {
+    for (const auto& entry:g_synced_corridors)
+        if (entry.used && entry.geometry.creates_base && entry.geometry.target_base_id==id) return true;
+    return false;
 }
 
 void build_remember_corridor(const WorldEvent& state, const base_geometry::GhostEnvelope& geometry) {

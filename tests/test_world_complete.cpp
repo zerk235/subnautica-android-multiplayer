@@ -29,7 +29,7 @@ void receive(const WorldPayload& p,const WorldManifest& m,bool corrupt=false){
 }
 int main(){
     assert(root=="/data/local/tmp/snmod_world_complete_tests");remove_tree_best_effort(root.c_str());assert(mkdir(root.c_str(),0770)==0);
-    native_slot("source");native_slot("local");
+    native_slot("source");native_slot("local");native_slot("identical");
     WorldPayload p{};assert(world_disk_ready("source")&&world_disk_capture("source",&p));
     assert(p.valid&&p.file_count==5&&p.content_guid_valid);std::vector<WorldCellEntry> entries;
     assert(world_parse_cells(p.files[4].data,p.files[4].size,&entries)&&entries.size()==2);
@@ -41,6 +41,17 @@ int main(){
     assert(world_slot_exists("guest",m)==kWorldSlotMatches);
     assert(get(root+"/guest/CellsCache/"+entries[0].name)==get(root+"/source/CellsCache/"+entries[0].name));
     assert(access((root+"/guest/snmod-cells.bin").c_str(),F_OK)!=0); // archive is not a game save file
+    // Role swap: identical bytes do not imply that a native save is ready for
+    // guest autoload. Explicit adoption must retain the native directory and
+    // commit the host-received marker even when every manifest file matches.
+    auto identical=manifest(p,"identical");
+    assert(world_slot_exists("identical",identical)==kWorldSlotMatches);
+    assert(!world_slot_is_host_received("identical"));
+    receive(p,identical);assert(!world_write_slot(identical));
+    receive(p,identical);assert(world_write_slot(identical,true));
+    assert(world_slot_is_host_received("identical"));
+    assert(world_slot_exists("identical",identical)==kWorldSlotMatches);
+    assert(get(root+"/.snmod_backup_identical/CellsCache/"+entries[0].name)==get(root+"/source/CellsCache/"+entries[0].name));
     WorldLoadFields fields{};assert(world_read_load_fields("guest",&fields)&&fields.game_mode==3);
     // Change only cells: old four native files stay byte-identical. Must refresh.
     put(root+"/source/CellsCache/baked-batch-cells-12-grp0.zip","new built room and dome");
@@ -55,6 +66,17 @@ int main(){
     // Never overwrite a native local save just because the host uses that slot name.
     auto local=manifest(fresh,"local");receive(fresh,local);assert(!world_write_slot(local));
     assert(get(root+"/local/CellsCache/baked-batch-cells-12-grp0.zip")==std::string(2067,'a'));
+    receive(fresh,local);assert(world_write_slot(local,true)); // explicit guest: retain former host's native save
+    assert(get(root+"/.snmod_backup_local/CellsCache/baked-batch-cells-12-grp0.zip")==std::string(2067,'a'));
+    assert(world_slot_is_host_received("local"));
+    put(root+"/source/screenshot.jpg","another host save");
+    WorldPayload latest{};assert(world_disk_capture("source",&latest));auto again=manifest(latest,"local");
+    receive(latest,again);assert(world_write_slot(again)); // later ordinary refresh must not erase the native original
+    bool native_kept=false;DIR* backups=opendir(root.c_str());assert(backups);
+    while(auto* entry=readdir(backups)) if(!strncmp(entry->d_name,".snmod_kept_local_",18)) {
+        native_kept=get(root+"/"+entry->d_name+"/CellsCache/baked-batch-cells-12-grp0.zip")==std::string(2067,'a');
+    }
+    closedir(backups);assert(native_kept);world_payload_free(&latest);
     // Checksums alone cannot authorize a malicious archive path.
     std::vector<uint8_t> malformed(p.files[4].data,p.files[4].data+p.files[4].size);
     malformed[20]='/';assert(!world_parse_cells(malformed.data(),malformed.size(),&entries));

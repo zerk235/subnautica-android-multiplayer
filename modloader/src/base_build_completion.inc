@@ -34,6 +34,9 @@ bool build_queue_base_change(WorldEvent state, base_geometry::GhostEnvelope geom
     else if (identity->removed) return false;
     identity->state = state;
     identity->geometry = geometry;
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    if (kind==kWorldEventBuild) build_record_piece_root(state);
+#endif
     slot->used = true;
     slot->state = state;
     slot->geometry = std::move(geometry);
@@ -60,6 +63,9 @@ bool build_is_preview(void* component) {
 uint8_t build_completed_set_state(void* self, uint8_t value, uint8_t set_amount, void* method) {
     WorldEvent state{};
     base_geometry::GhostEnvelope geometry;
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    FirstBaseCapture first_base;
+#endif
     bool was_complete = true;
     const bool eligible = value && !g_applying_remote && g_build_baseline && g_role_known;
     if (eligible)
@@ -85,7 +91,13 @@ uint8_t build_completed_set_state(void* self, uint8_t value, uint8_t set_amount,
                 geometry.ghost_class=cls;
                 geometry.target_offset={offset[0],offset[1],offset[2]};
                 geometry.target_base_anchor={anchor[0],anchor[1],anchor[2]};
-                if (!base_geometry::supported_existing_piece(geometry,state.tech_type)) {
+                if (geometry.target_base_id.empty() && base_geometry::standalone_piece_topology(geometry,state.tech_type)) {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+                    if (!build_capture_first_base(self,geometry,&first_base)) return false;
+#else
+                    return false;
+#endif
+                } else if (!base_geometry::supported_existing_piece(geometry,state.tech_type)) {
                     LOG_WARN("build: completed piece unsupported id=%s tech=%d ghost=%s target=%s offset=(%d,%d,%d) anchor=(%d,%d,%d); new standalone bases are not supported",
                              state.object_id,state.tech_type,cls,target,offset[0],offset[1],offset[2],anchor[0],anchor[1],anchor[2]);
                     return false;
@@ -96,7 +108,17 @@ uint8_t build_completed_set_state(void* self, uint8_t value, uint8_t set_amount,
         },
         [&]() { return g_base_set_state_original(self, value, set_amount, method); },
         [&]() {
-            build_queue_base_change(state, std::move(geometry), kWorldEventBuild);
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+            if (first_base.ghost && !build_finish_first_base(first_base,&geometry,state.tech_type)) {
+                LOG_WARN("build: first base capture failed after native completion id=%s",state.object_id);
+                return;
+            }
+#endif
+            if (build_queue_base_change(state, std::move(geometry), kWorldEventBuild)) {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+                if (first_base.completed_base) build_record_piece_root(state,first_base.completed_base);
+#endif
+            }
         },
         [&](const char* stage) {
             LOG_WARN("build: completion observation failed stage=%s; original game transition preserved", stage);
@@ -130,6 +152,11 @@ void build_send_completed() {
             continue;
         }
         if (now > pending.expires) { pending = CompletedBaseBuild{}; continue; }
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        auto* identity=build_synced_corridor(pending.state.object_id);
+        if (pending.state.kind==kWorldEventBuild && identity && !identity->root_pose_valid)
+            build_record_piece_root(pending.state);
+#endif
         if (now < pending.next_send || net_peer_count() == 0) continue;
         if (!net_geometry_enqueue(pending.geometry)) { pending.next_send = now + 1.0; continue; }
         net_post_world_event(pending.state, true);
@@ -170,6 +197,18 @@ void* build_final_deconstruction(void* self, void* method) {
                 geometry.ghost_class=cls;
                 geometry.target_offset={offset[0],offset[1],offset[2]};
                 geometry.target_base_anchor={anchor[0],anchor[1],anchor[2]};
+                if (geometry.target_base_id.empty()) {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+                    auto* detached=build_detached_demolition(self,demolition,geometry);
+                    if (detached) {
+                        state=detached->state;geometry=detached->geometry;
+                        LOG_INFO("build: final empty-base demolition matched id=%s base=%s",state.object_id,geometry.target_base_id.c_str());
+                        return true;
+                    }
+#endif
+                    LOG_WARN("build: detached demolition has no exact session cell tech=%d",demolition.tech_type);
+                    return false;
+                }
                 if (!base_geometry::supported_existing_piece(geometry,demolition.tech_type)) return false;
             }
             auto* identity = demolition.tech_type==5504 ? build_synced_ladder(geometry) : base_geometry::face_type_for_tech(demolition.tech_type)>=0 ? build_synced_face(geometry) : build_synced_cell(geometry);

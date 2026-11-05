@@ -17,6 +17,7 @@ import java.util.UUID;
 public final class MainActivity extends Activity {
     TextView game, status, note, savesNote;
     Button prepare, install, launch, cancel, backup, restore, remove, export, importCopy;
+    Button launchHost,launchGuest;
     String removalToken;
     final Shizuku.OnRequestPermissionResultListener permissionResult=(request,result)->render();
     final Handler handler = new Handler(Looper.getMainLooper());
@@ -32,8 +33,18 @@ public final class MainActivity extends Activity {
         scroll.addView(body); setContentView(scroll);
         text(body, "SUBNAUTICA", 14, Color.rgb(79, 216, 206));
         text(body, "Android Multiplayer", 28, Color.WHITE);
-        text(body, "Установка мода · предварительная версия", 14, Color.LTGRAY);
+        text(body, "Установка мода · 0.3.0-preview", 14, Color.LTGRAY);
         game = text(body, "", 16, Color.WHITE);
+        text(body,"Совместная игра",20,Color.rgb(79,216,206));
+        text(body,"Выбери роль этого телефона. Для игры нужна одна Wi-Fi сеть и одинаковая сборка мода на обоих устройствах.",16,Color.LTGRAY);
+        launchHost=button(body,"Запустить хостом");
+        launchHost.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("Этот телефон — хост")
+            .setMessage("Сохрани текущую игру и выйди в главное меню. После запуска загрузи здесь мир, которым хочешь поделиться. Можно выбрать и копию, полученную от другого хоста.\n\nНа втором телефоне выбери «Подключиться гостем» и оставь игру в главном меню. Роль сохраняется для следующих запусков.")
+            .setNegativeButton("Отмена",null).setPositiveButton("Запустить хостом",(d,w)->launchGame("host")).show());
+        launchGuest=button(body,"Подключиться гостем");
+        launchGuest.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("Этот телефон — гость")
+            .setMessage("Сохрани текущую игру и выйди в главное меню. У хоста уже должен быть загружен мир. На этом телефоне оставь главное меню — мод сам получит мир и подключится.\n\nЕсли локальный мир с таким именем отличается, его папка будет сохранена отдельно перед получением копии хоста. Роль сохраняется для следующих запусков.")
+            .setNegativeButton("Отмена",null).setPositiveButton("Подключиться гостем",(d,w)->launchGame("guest")).show());
         Shizuku.addRequestPermissionResultListener(permissionResult);
         text(body,"1  Сохранить миры",20,Color.rgb(79,216,206));
         text(body,"Перед заменой подписи сохраним все миры отдельно от игры и проверим каждый файл. Для доступа к папке игры нужен Shizuku. На Android 11+ он запускается через беспроводную отладку без компьютера и root.",16,Color.LTGRAY);
@@ -110,11 +121,8 @@ public final class MainActivity extends Activity {
         restore.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("Восстановить проверенную копию?")
             .setMessage("Игра будет остановлена. Сначала запишем миры во временную папку, проверим каждый файл и только затем подключим их к игре. Если в игре уже есть миры, их папка останется рядом как резервная. Несохранённый прогресс запущенной игры потеряется — сохранитесь и выйдите в меню заранее.")
             .setNegativeButton("Отмена",null).setPositiveButton("Восстановить",(d,w)->start("restore")).show());
-        launch = button(body, "Открыть игру");
-        launch.setOnClickListener(v -> {
-            Intent intent = getPackageManager().getLaunchIntentForPackage(PatchEngine.GAME);
-            if (intent != null) startActivity(intent); else alert("Игра пока не установлена");
-        });
+        launch = button(body, "Открыть игру автоматически");
+        launch.setOnClickListener(v -> launchGame("auto"));
         cancel = button(body, "Отменить ожидающую установку Android");
         cancel.setOnClickListener(v -> {
             int id = PatchService.pendingSession(this);
@@ -128,7 +136,7 @@ public final class MainActivity extends Activity {
             render();
         });
         text(body, "Состояние", 20, Color.rgb(79, 216, 206));
-        status = text(body, "", 15, Color.WHITE); status.setTextIsSelectable(true);
+        status = text(body, "", 15, Color.WHITE);
         Button report = button(body, "Скопировать отчёт");
         report.setOnClickListener(v -> {
             String value = game.getText() + "\n" + status.getText();
@@ -141,9 +149,20 @@ public final class MainActivity extends Activity {
 
     void start(String action) {
         startForegroundService(new Intent(this, PatchService.class).setAction(action));
-        status.setText("Запуск…");
+        updateText(status,"Запуск…");
+    }
+    void launchGame(String role) {
+        Intent intent=getPackageManager().getLaunchIntentForPackage(PatchEngine.GAME);
+        if(intent==null){alert("Игра пока не установлена");return;}
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        intent.putExtra("snmp_launch_role",role);
+        intent.putExtra("snmp_launch_request",UUID.randomUUID().toString());
+        startActivity(intent);
     }
     void alert(String message) { new AlertDialog.Builder(this).setMessage(message).setPositiveButton("Понятно", null).show(); }
+    void updateText(TextView view,CharSequence value) {
+        if(!android.text.TextUtils.equals(view.getText(),value)) view.setText(value);
+    }
     public void onResume() { super.onResume(); handler.post(refresh); }
     public void onPause() { handler.removeCallbacks(refresh); super.onPause(); }
     public void onDestroy() { Shizuku.removeRequestPermissionResultListener(permissionResult); super.onDestroy(); }
@@ -175,42 +194,49 @@ public final class MainActivity extends Activity {
         try {
             PatchEngine engine = new PatchEngine(this); PackageInfo info = engine.installed();
             JSONObject mod = engine.payload();
-            game.setText("\nИгра: " + (info == null ? "не найдена" : info.versionName) + "\nМод: " + mod.getString("buildId").substring(0,12) + " · протокол 23\n");
-            boolean busy = PatchService.BUSY.get(); JSONObject plan = engine.plan();
+            String gameLabel="\nИгра: " + (info == null ? "не найдена" : info.versionName) + "\nМод: " + mod.getString("buildId").substring(0,12) + " · протокол " + mod.getInt("protocol") + "\n";
+            if(info==null && engine.retained()!=null) gameLabel+="Игра осталась в другом профиле / клоне.\n";
+            updateText(game,gameLabel);
+            boolean busy = PatchService.BUSY.get();
+            JSONObject plan = null; String planError = null;
+            try { plan = engine.plan(); }
+            catch (Exception invalidPlan) { planError = invalidPlan.getMessage(); }
             int pending = PatchService.pendingSession(this);
             SaveManager worlds=new SaveManager(this); JSONObject saved=worlds.latest();
             if(info==null && saved!=null && !getSharedPreferences("status",0).getBoolean("restoreRequired",false))
                 getSharedPreferences("status",0).edit().putBoolean("restoreRequired",true).apply();
             String access=SaveBridge.readiness(); boolean needsRestore=worlds.needsRestore();
-            savesNote.setText((access==null?"Shizuku: доступ предоставлен.":access)+"\n"+(saved==null?"Проверенной копии миров пока нет.":"Копия: "+saved.getInt("files")+" файлов, "+(saved.getLong("bytes")/1024)+" КиБ. "+(needsRestore?"После замены игры нужно восстановление.":"Копия хранится отдельно от игры.")));
+            updateText(savesNote,(access==null?"Shizuku: доступ предоставлен.":access)+"\n"+(saved==null?"Проверенной копии миров пока нет.":"Копия: "+saved.getInt("files")+" файлов, "+(saved.getLong("bytes")/1024)+" КиБ. "+(needsRestore?"После замены игры нужно восстановление.":"Копия хранится отдельно от игры.")));
             backup.setEnabled(!busy && pending<0 && info!=null && access==null && !needsRestore);
             restore.setEnabled(!busy && pending<0 && info!=null && saved!=null && access==null);
             export.setEnabled(!busy && saved!=null);
             importCopy.setEnabled(!busy && pending<0);
             prepare.setEnabled(!busy && info != null && pending < 0);
             String blocker = engine.installBlocker(plan);
-            if(info==null && engine.retained()!=null) game.setText(game.getText()+"Игра осталась в другом профиле / клоне.\n");
             remove.setEnabled(!busy && pending<0 && info!=null && plan!=null && plan.getBoolean("full") && blocker!=null && saved!=null && access==null);
             install.setEnabled(!busy && plan != null && blocker == null && pending < 0);
             cancel.setVisibility(pending < 0 ? View.GONE : View.VISIBLE);
             cancel.setEnabled(!busy);
-            note.setText(plan == null ? "После подготовки здесь станет доступна установка." : (blocker == null
+            String noteValue=plan == null ? (planError == null ? "После подготовки здесь станет доступна установка." : planError) : (blocker == null
                 ? "Файлы проверены. Android запросит разрешение и подтверждение установки."
-                : blocker));
+                : blocker);
             launch.setEnabled(!busy && info != null && !needsRestore);
-            if(needsRestore) note.setText("Мод установлен. Восстановите миры из проверенной копии перед запуском игры.");
+            launchHost.setEnabled(launch.isEnabled());launchGuest.setEnabled(launch.isEnabled());
+            if(needsRestore) noteValue="Мод установлен. Восстановите миры из проверенной копии перед запуском игры.";
+            updateText(note,noteValue);
             if(removalToken!=null && removalToken.equals(getSharedPreferences("status",0).getString("removalToken",""))
                 && System.currentTimeMillis()-getSharedPreferences("status",0).getLong("removalReadyAt",0)<60000) {
                 removalToken=null;
                 getSharedPreferences("status",0).edit().remove("removalToken").apply();
                 startActivity(new Intent(Intent.ACTION_DELETE,Uri.parse("package:"+PatchEngine.GAME)));
             }
-            status.setText(getSharedPreferences("status", 0).getString("message", "Готов к подготовке. Сначала сохраните игру."));
+            updateText(status,getSharedPreferences("status", 0).getString("message", "Готов к подготовке. Сначала сохраните игру."));
         } catch (Exception e) {
             prepare.setEnabled(!PatchService.BUSY.get()); install.setEnabled(false);
             remove.setEnabled(false); restore.setEnabled(false); backup.setEnabled(false); launch.setEnabled(false);
-            note.setText(e.getMessage());
-            status.setText(getSharedPreferences("status", 0).getString("message", "Нужна повторная подготовка."));
+            launchHost.setEnabled(false);launchGuest.setEnabled(false);
+            updateText(note,e.getMessage());
+            updateText(status,getSharedPreferences("status", 0).getString("message", "Нужна повторная подготовка."));
         }
     }
     int dp(int value) { return (int)(getResources().getDisplayMetrics().density * value + .5f); }

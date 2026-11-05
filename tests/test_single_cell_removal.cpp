@@ -17,6 +17,7 @@ struct Candidate {int32_t bounds[6]{4,1,3,4,1,3};int32_t recipe=5519;bool has_fa
 std::vector<Candidate*> candidates{&candidate};
 uint8_t current=6;bool glass_ok=true,throw_clear=false,corrupt_clear=false;
 unsigned writes=0,rebuilds=0;
+unsigned destroys=0,pre_destroys=0;
 bool build_live(void* p){return p!=nullptr;}
 void il2cpp_field_get_value(Il2CppObject* obj,void* f,void* out){
     if(f==&cells_field){assert(obj==reinterpret_cast<Il2CppObject*>(&target_token));*static_cast<void**>(out)=&cell_array;return;}
@@ -44,11 +45,17 @@ bool build_corridor_glass_matches(void*,BuildGridPoint,int32_t){return glass_ok;
 void clear(void*,BuildGridPoint,void*){++writes;if(throw_clear)throw std::runtime_error("native");if(!corrupt_clear)current=0;}
 void rebuild(void*,void*){++rebuilds;}
 uint8_t allowed(void* p,void**,void*){return static_cast<Candidate*>(p)->allowed;}
+uint8_t empty(void*,void*){return current==0 && cell_array.data[1]==0;}
+void pre_destroy(void*,void*){++pre_destroys;}
+void destroy(void*,void*){++destroys;}
+Entry<decltype(&destroy)>g_object_destroy{&destroy};
 struct {
     void* type=&candidate,*bounds=&bounds_field,*face=&face_field,*recipe=&recipe_field;
     Entry<decltype(&clear)> clear_cell{&clear};
     Entry<decltype(&rebuild)> fix_floors{&::rebuild},fix_links{&::rebuild},rebuild{&::rebuild};
     Entry<decltype(&allowed)> allowed{&::allowed};
+    Entry<decltype(&empty)>is_empty{&empty};
+    Entry<decltype(&pre_destroy)>pre_destroy{&::pre_destroy};
 } g_corridor_removal_api;
 bool build_resolve_corridor_removal(){return true;}
 bool g_corridor_removal_failed=false;int g_applying_remote=0;
@@ -67,7 +74,7 @@ bool build_room_footprint_matches(void*,const base_geometry::GhostEnvelope&,bool
 void reset(){
     for(auto& e:g_synced_corridors)e=SyncedCorridor{};
     candidate=Candidate{};candidates={&candidate};cell_array.data[0]=6;cell_array.data[1]=4;
-    current=6;glass_ok=true;throw_clear=corrupt_clear=false;writes=rebuilds=0;
+    current=6;glass_ok=true;throw_clear=corrupt_clear=false;writes=rebuilds=destroys=pre_destroys=0;
     g_corridor_removal_failed=false;g_applying_remote=7;foundation_intact=other_root=foundation_clear_verified=true;
 }
 WorldEvent make_event(int tech=5519,const char* id="connector"){
@@ -87,6 +94,15 @@ void remember(const WorldEvent& e,const base_geometry::GhostEnvelope& g){
     build_remember_corridor(e,g);build_synced_corridor(e.object_id)->removed=true;
 }
 int main(){
+    // Last cell of a newly shared base follows the native destroy branch.
+    reset();auto born=make_event(5510,"first-corridor");auto birth=make_geometry(born);
+    birth.creates_base=true;birth.base_pose={0,0,0,0,0,0,1};
+    remember(born,birth);current=4;candidate.recipe=5510;cell_array.data[0]=4;cell_array.data[1]=0;
+    candidate.allowed=false;
+    assert(!build_apply_corridor_removal(&target_token,born,birth)&&destroys==0&&writes==0);
+    candidate.allowed=true;
+    assert(build_apply_corridor_removal(&target_token,born,birth)&&writes==1&&destroys==1&&pre_destroys==1&&rebuilds==0);
+    assert(build_synced_corridor(born.object_id)->removal_applied);
     // Re-entered save: native geometry/handles exist but no placement registry.
     for(int tech:{5519,5510,5516,5509,5500}){
         reset();auto loaded=make_event(tech,"loaded");auto saved=make_geometry(loaded);

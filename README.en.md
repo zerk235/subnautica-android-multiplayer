@@ -4,16 +4,20 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-This is a public preview demo. The Android installer passed a clean game installation, Unity launch and a two-phone LAN session. Version 0.2 adds verified world backups and restore through separately authorized Shizuku. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
+This is a public preview demo. The Android installer passed a clean game installation, Unity launch and a two-phone LAN session. Version 0.3 adds explicit host/guest selection and retains verified world backups and restore through separately authorized Shizuku. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Download and install
 
-**[Download installer 0.2 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.2.0-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.2.0-installer-preview)
+**[Download installer 0.3 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.0-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.0-installer-preview)
 
-**November 4 update:** the APK now fixes synchronization of saved base pieces
-after re-entering a world. Update SN Multiplayer Installer over the existing app,
+**November 5 update:** the installer now has **“Запустить хостом” (Launch as host)**
+and **“Подключиться гостем” (Join as guest)**. A non-root phone can host a previously
+downloaded world. Autoload after switching roles retains the former host's original save.
+Update SN Multiplayer Installer over the existing app,
 save your game and return to its main menu, then run **Prepare mod → Install
 prepared mod** on both phones. Keep the installer's data: it holds your update key.
+Both players must update the mod: protocol **25** is incompatible with the previous
+public protocol 23 build. [Release notes](docs/releases/0.3.0-installer-preview.md).
 
 Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
 its resources. The installer runs on the phone without a PC or root and does not
@@ -41,13 +45,14 @@ and the local key needed for future updates. Full steps are in the
 ## Current scope
 
 - Two Android phones on the same Wi-Fi network or hotspot.
+- Explicit host/guest buttons in the installer; no root or Shizuku is needed to choose a role. The role persists between launches and changes only in the main menu.
 - Host discovery, full supported saved-world transfer including `CellsCache`, and guest autoload from the main menu. No PC is needed during a join.
 - Remote player rendering, head visibility, indoor lighting and Builder grip fixes.
 - Live construction/deconstruction of supported base pieces attached to an existing shared base.
 
 Tested game version: **1.22.83315**, Android **arm64-v8a**. Both phones need matching game and mod builds. Other game versions and larger sessions are unverified.
 
-The host must save the world before the guest joins. For the initial demo test, build and save the initial base before connecting the guest. Creating the first standalone base after joining is not supported yet. Fish, complete ecosystem simulation, all held items and all animations are not synchronized. Remote flashlight behavior and Seaglide placement still need work. Internet matchmaking is not implemented.
+Choose **Launch as host** on one phone, load and save a world, then choose **Join as guest** on the other and leave it in the main menu. Save and return to the main menu on both phones before switching roles. For the initial demo test, build and save the initial base before connecting the guest. Standalone new bases remain experimental: foundation appearance was tested, but removing the last piece is still broken. Fish, complete ecosystem simulation, all held items and all animations are not synchronized. Remote flashlight on/off was tested; Seaglide placement still needs work. Internet matchmaking is not implemented.
 
 See the Russian [play guide](docs/PLAYING.md), [compatibility matrix](docs/COMPATIBILITY.md), [build instructions](docs/BUILDING.md) and [demo roadmap](docs/ROADMAP.md).
 

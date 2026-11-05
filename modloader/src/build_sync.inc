@@ -1010,6 +1010,8 @@ void build_pump_jobs() {
         bool anchored = (j.state.build_flags & kWorldBuildAnchored) != 0;
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         if (anchored && j.state.kind == kWorldEventRemove) {
+            const auto* removed=build_synced_corridor(j.state.object_id);
+            if (removed && removed->removal_applied) { build_finish_job(j);continue; }
             const uint64_t fingerprint = uint64_t(j.state.geometry_hash_low) |
                 (uint64_t(j.state.geometry_hash_high) << 32);
             const auto* geometry = g_geometry_cache.find(j.state.origin_id, j.state.object_id, fingerprint, now);
@@ -1098,7 +1100,7 @@ void build_pump_jobs() {
                 continue;
             }
             if (j.state.face_has_value ||
-                !base_geometry::supported_existing_piece(*matched_geometry, j.state.tech_type)) {
+                !base_geometry::supported_piece_placement(*matched_geometry, j.state.tech_type)) {
                 LOG_WARN("build: unsupported base piece id=%s tech=%d ghost=%s", j.state.object_id,
                          j.state.tech_type, matched_geometry->ghost_class.c_str());
                 build_finish_job(j);
@@ -1106,10 +1108,14 @@ void build_pump_jobs() {
             }
             corridor_geometry = matched_geometry;
             corridor_target = build_corridor_target(matched_geometry->target_base_id,
-                                                     matched_geometry->target_base_anchor);
-            if (!corridor_target) {
+                                                     matched_geometry->target_base_anchor,!matched_geometry->creates_base);
+            if (!corridor_target && !matched_geometry->creates_base) {
                 j.next_try = now + kBuildJobRetrySeconds;
                 continue;
+            }
+            if (!corridor_target && matched_geometry->creates_base && build_base_id_exists(matched_geometry->target_base_id)) {
+                j.next_try=now+kBuildJobRetrySeconds;
+                continue; // same ID is busy, ambiguous, or not fully loaded
             }
 #else
             LOG_WARN("build: geometry received for id=%s; reconstruction is disabled", j.state.object_id);

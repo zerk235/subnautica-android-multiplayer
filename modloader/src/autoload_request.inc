@@ -8,6 +8,11 @@ struct AutoLoadRequest {
     double raised_at;
 };
 AutoLoadRequest g_auto_load_request = {PTHREAD_MUTEX_INITIALIZER};
+void net_world_autoload_cancel() {
+    pthread_mutex_lock(&g_auto_load_request.lock);
+    g_auto_load_request.pending=false;
+    pthread_mutex_unlock(&g_auto_load_request.lock);
+}
 
 void net_world_autoload_notify(const char* slot, uint32_t generation) {
     if (!slot || !*slot || strlen(slot)>=sizeof(g_auto_load_request.slot)) return;

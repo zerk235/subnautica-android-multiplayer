@@ -17,8 +17,10 @@ void* visual_hand_anchor(void* root,void* bone,void* socket) {
 
 // A camera-socket tool's authored right-hand IK target is a wrist pose, not
 // the camera origin. Null plugOrigin is legal in ModelPlug and denotes root.
-void* select_visual_grip(void* root,void* plug,void* right_ik,int socket) {
-    if (socket==1 && prop_owns_transform(root,right_ik)) return right_ik;
+void* select_visual_grip(void* root,void* plug,void* right_ik,int socket,uint32_t tech=0) {
+    // Seaglide's socket=Hand but plugOrigin is its center mount. Its authored
+    // right-hand IK transform identifies the handle and wrist pose instead.
+    if ((socket==1 || tech==751) && prop_owns_transform(root,right_ik)) return right_ik;
     if (prop_owns_transform(root,plug)) return plug;
     return !plug ? root : nullptr;
 }

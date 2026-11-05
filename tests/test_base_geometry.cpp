@@ -134,6 +134,18 @@ int main() {
     assert(encode_envelope(e, &envelope));
     assert(decode_envelope(envelope.data(), envelope.size(), &decoded));
     assert(decoded.target_base_id.empty());
+    e.creates_base=true;e.base_pose={1,2,3,0,0,0,1};
+    assert(!encode_envelope(e,&envelope)); // a birth must include the actual new ID
+    e.target_base_id="new-base";
+    assert(encode_envelope(e,&envelope));
+    assert(decode_envelope(envelope.data(),envelope.size(),&decoded));
+    assert(decoded.creates_base && decoded.base_pose==e.base_pose);
+    auto bad_birth=envelope;bad_birth[48]=2;
+    assert(!decode_envelope(bad_birth.data(),bad_birth.size(),&decoded));
+    e.base_pose[3]=NAN;assert(!encode_envelope(e,&envelope));e.base_pose[3]=0;
+    e.base_pose[6]=0;assert(!encode_envelope(e,&envelope));e.base_pose[6]=1;
+    e.creates_base=false;assert(!encode_envelope(e,&envelope)); // no hidden creation pose
+    e.base_pose={};
     TransferKey reliable_key; reliable_key.origin = 17; reliable_key.generation = 77;
     reliable_key.object = object_key(e.object_id);
     ReliableSender sender; ReliableReceiver receiver;

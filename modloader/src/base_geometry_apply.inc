@@ -1,6 +1,8 @@
 // Experimental game-thread path for a completed single-cell corridor attached to an
 // existing base. This is intentionally excluded unless SNMOD_BASE_GEOMETRY_APPLY is set.
 struct BuildGridPoint { int32_t x, y, z; };
+struct BuildGridBounds { BuildGridPoint min,max; };
+using BuildGetBoundsFn = BuildGridBounds (*)(void*,void*);
 using BuildSetSizeFn = void (*)(void*, BuildGridPoint, void*);
 using BuildGetCellFn = uint8_t (*)(void*, BuildGridPoint, void*);
 using BuildCellIndexFn = int32_t (*)(void*, BuildGridPoint, void*);
@@ -37,9 +39,13 @@ struct CorridorApi {
     Entry<BuildSetSizeFn> set_size;
     Entry<BuildGetCellFn> get_cell,get_raw_cell;
     Entry<BuildCellIndexFn> cell_index;
+    Entry<BuildGetBoundsFn> bounds;
     Entry<BuildSetGhostFn> set_placement_ghost;
     Entry<BuildDeserializeFn> deserialize;
     Entry<ManagedFn> finish_deserialization, place;
+    Entry<void* (*)(void*)> base_prefab, initialize_base;
+    Entry<void* (*)(void*,void*)> start_base_loader;
+    bool base_loader_started = false;
     Entry<BuildSetBoolFn> set_ghost_visible;
     Entry<BuildSetStateFn> set_state;
 };
@@ -66,16 +72,20 @@ bool build_resolve_corridor_api() {
     a.get_cell.bind(build_typed_method(a.base, "GetCell", 1, "Int3"));
     a.get_raw_cell.bind(build_typed_method(a.base,"GetRawCellType",1,"Int3"));
     a.cell_index.bind(build_typed_method(a.base, "GetCellIndex", 1, "Int3"));
+    a.bounds.bind(find_method(a.base,"get_Bounds",0));
     a.set_placement_ghost.bind(find_method(a.base, "SetPlacementGhost", 1));
     a.deserialize.bind(find_method(a.base, "OnProtoDeserialize", 1));
     a.finish_deserialization.bind(find_method(a.base, "FinishDeserialization", 0));
     a.place.bind(find_method(a.ghost, "Place", 0));
+    a.base_prefab.bind(find_method(a.ghost,"GetBasePrefab",0));
+    a.initialize_base.bind(find_method(a.ghost,"InitializeAsync",0));
+    a.start_base_loader.bind(find_method(find_class_in_domain("UWE","CoroutineHost"),"StartCoroutine",1));
     a.set_ghost_visible.bind(build_typed_method(g_build_base_class, "SetGhostVisible", 1,
                                                 "System.Boolean"));
     a.set_state.bind(find_method(g_build_base_class, "SetState", 2));
     a.ready = a.base_is_ghost && a.base_is_placed && a.placement_ghost && a.set_size &&
               a.cell_objects && a.deserialization_finished && a.clear_array &&
-              a.get_cell && a.get_raw_cell && a.cell_index && a.set_placement_ghost && a.deserialize &&
+              a.get_cell && a.get_raw_cell && a.cell_index && a.bounds && a.set_placement_ghost && a.deserialize &&
               a.finish_deserialization && a.place && a.set_ghost_visible && a.set_state;
     LOG_INFO("build: corridor apply API %s", a.ready ? "ready" : "unavailable");
     return a.ready;
@@ -90,38 +100,60 @@ bool build_corridor_glass_matches(void* target, BuildGridPoint cell, int32_t tec
         (reinterpret_cast<uint8_t*>(glass) + 0x20)[index] == uint8_t(base_geometry::corridor_glass(tech_type));
 }
 
+bool build_base_id_exists(const std::string& id) {
+    void* list=g_find_objects_all.call(g_build_base_geometry_type,true,g_find_objects_all.method);
+    if (!list) return true; // inability to inventory must not create a duplicate
+    const int32_t count=g_array_get_length.call(list,g_array_get_length.method);
+    for (int32_t i=0;i<count;++i) {
+        void* base=g_array_get_value.call(list,i,g_array_get_value.method);
+        if (!build_live(base)) continue;
+        void* uid=build_uid(base);char actual[kWorldEventObjectIdSize]{};
+        if (uid && string_to_ascii(g_unique_get_id.call(uid,g_unique_get_id.method),actual,sizeof(actual)) && id==actual) return true;
+    }
+    return false;
+}
+
 #include "base_foundation_readback.inc"
 
 // An exact ID is essential: proximity alone can attach a corridor to the wrong base.
-void* build_corridor_target(const std::string& expected_id, const std::array<int32_t, 3>& expected_anchor) {
+void* build_corridor_target(const std::string& expected_id, const std::array<int32_t, 3>& expected_anchor,bool require_anchor=true) {
     if (!build_resolve_corridor_api() || expected_id.empty()) return nullptr;
     void* list = g_find_objects_all.call(g_build_base_geometry_type, true, g_find_objects_all.method);
     if (!list) return nullptr;
     const int32_t count = g_array_get_length.call(list, g_array_get_length.method);
     void* found = nullptr;
     bool anchor_matches = false;
+    static double next_report=0;
     for (int32_t i = 0; i < count; ++i) {
         void* candidate = g_array_get_value.call(list, i, g_array_get_value.method);
         if (!build_live(candidate)) continue;
         bool is_ghost = false, is_placed = false;
         il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate), g_corridor_api.base_is_ghost, &is_ghost);
         il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate), g_corridor_api.base_is_placed, &is_placed);
-        if (is_ghost || !is_placed) continue;
         void* uid = build_uid(candidate);
         char id[kWorldEventObjectIdSize]{};
         if (!uid || !string_to_ascii(g_unique_get_id.call(uid, g_unique_get_id.method), id, sizeof(id)) ||
             expected_id != id) continue;
+        if(is_ghost || !is_placed) {
+            if(build_now()>=next_report){next_report=build_now()+5;LOG_INFO("build: target deferred id=%s ghost=%u placed=%u",id,unsigned(is_ghost),unsigned(is_placed));}
+            continue;
+        }
         if (found) return nullptr; // duplicate IDs are ambiguous even if only one anchor matches
         found = candidate;
         int32_t anchor[3]{};
         il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate), g_ghost_capture.anchor, anchor);
         anchor_matches = anchor[0] == expected_anchor[0] && anchor[1] == expected_anchor[1] &&
                          anchor[2] == expected_anchor[2];
+        if(require_anchor && !anchor_matches && build_now()>=next_report) {
+            next_report=build_now()+5;
+            LOG_INFO("build: target anchor deferred id=%s actual=(%d,%d,%d) expected=(%d,%d,%d)",id,anchor[0],anchor[1],anchor[2],expected_anchor[0],expected_anchor[1],expected_anchor[2]);
+        }
     }
-    if (!found || !anchor_matches) return nullptr;
+    if (!found || (require_anchor && !anchor_matches)) return nullptr;
     void* current_ghost = nullptr;
     il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(found), g_corridor_api.placement_ghost,
                            &current_ghost);
+    if(build_live(current_ghost) && build_now()>=next_report){next_report=build_now()+5;LOG_INFO("build: target busy id=%s placement=%p",expected_id.c_str(),current_ghost);}
     return build_live(current_ghost) ? nullptr : found;
 }
 
@@ -189,21 +221,53 @@ bool build_corridor_storage_valid(void* base, const base_geometry::Snapshot& sna
            matches(g_corridor_api.cell_objects, count);
 }
 
+#include "base_creation.inc"
+#include "base_detached_removal.inc"
+
 bool build_apply_completed_corridor_inner(void* prefab, void* target, const WorldEvent& e,
                                          const base_geometry::GhostEnvelope& snapshot,
                                          CorridorAttempt& attempt) {
     if (!build_payload_valid(e) || !(e.build_flags & kWorldBuildComplete) || e.face_has_value ||
-        !base_geometry::supported_existing_piece(snapshot, e.tech_type) ||
-        snapshot.object_id != e.object_id || !build_live(prefab) || !build_live(target) ||
-        !build_resolve_corridor_api() || g_build_id_root_count >= kBuildKnownLimit ||
+        !base_geometry::supported_piece_placement(snapshot, e.tech_type) ||
+        snapshot.object_id != e.object_id || !build_live(prefab) || (!snapshot.creates_base && !build_live(target)) ||
+        !build_resolve_corridor_api() || g_build_id_root_count+(snapshot.creates_base ? 3 : 1)>kBuildKnownLimit ||
         !build_corridor_record(e, true)) {
         LOG_WARN("build: piece replay prerequisites refused id=%s tech=%d",e.object_id,e.tech_type);
         return false;
     }
+    const bool creates=snapshot.creates_base;
+    if (creates && target) {
+        if (!build_created_base_present(target,e,snapshot)) return false;
+        auto* record=build_corridor_record(e,true);
+        record->used=true;record->verified=true;record->origin=e.origin_id;
+        snprintf(record->object_id,sizeof(record->object_id),"%s",e.object_id);
+        build_remember_corridor(e,snapshot);
+        build_record_piece_root(e,target);
+        LOG_INFO("build: existing first base adopted id=%s base=%s",e.object_id,snapshot.target_base_id.c_str());
+        return true;
+    }
+    if (creates) {
+        // Finish() instantiates a static prefab directly. A guest who has never
+        // opened the builder may not have loaded it yet. Retry before any write.
+        auto& api=g_corridor_api;
+        if (!api.base_prefab || !api.initialize_base || !api.start_base_loader) return false;
+        if (!build_live(api.base_prefab.call(api.base_prefab.method))) {
+            if (!api.base_loader_started) {
+                void* loader=api.initialize_base.call(api.initialize_base.method);
+                if (loader) {
+                    api.base_loader_started=true;
+                    api.start_base_loader.call(loader,api.start_base_loader.method);
+                    LOG_INFO("build: loading first-base prefab before replay");
+                }
+            }
+            return false;
+        }
+        api.base_loader_started=false;
+    }
 
     // A connector must not overwrite a differing local cell when the worlds
     // are temporarily out of step. Retry until the target cell becomes free.
-    if ((e.tech_type==5519 || base_geometry::multi_cell_piece(e.tech_type)) &&
+    if (!creates && (e.tech_type==5519 || base_geometry::multi_cell_piece(e.tech_type)) &&
         !build_piece_footprint_free(target,snapshot,e.tech_type)) return false;
     const Vector3 position{e.x, e.y, e.z};
     const Quaternion rotation{e.qx, e.qy, e.qz, e.qw};
@@ -228,11 +292,11 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
     const char* class_name = cls ? il2cpp_class_get_name(cls) : nullptr;
     Entry<ManagedFn> setup;
     if (cls) setup.bind(find_method(cls, "SetupGhost", 0));
-    void* target_go = g_get_game_object.call(target, g_get_game_object.method);
+    void* target_go = target ? g_get_game_object.call(target, g_get_game_object.method) : nullptr;
     void* target_transform = target_go ? g_gameobject_get_transform.call(target_go,
                                                 g_gameobject_get_transform.method) : nullptr;
     bool ok = build_live(c) && uid && transform && build_live(ghost) && build_live(ghost_base) &&
-              ghost_base_field == ghost_base && target_transform && class_name &&
+              ghost_base_field == ghost_base && (creates || target_transform) && class_name &&
               strcmp(class_name, base_geometry::piece_ghost(e.tech_type)) == 0 && setup;
     if (ok && base_geometry::multi_cell_piece(e.tech_type)) {
         int32_t actual_tech=0;
@@ -259,6 +323,12 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
         ok = build_keep_id_root(root);
         if (ok) g_uid_set_id.call(uid, id, g_uid_set_id.method);
     }
+    void* created_base_id=nullptr;
+    if (ok && creates) {
+        created_base_id=il2cpp_string_new(snapshot.target_base_id.c_str());
+        ok=created_base_id && build_keep_id_root(il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(created_base_id),true)) &&
+            build_keep_id_root(il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(ghost),true));
+    }
     if (!ok) {
         LOG_WARN("build: piece prefab initialization refused id=%s tech=%d ghost=%s",e.object_id,e.tech_type,class_name ? class_name : "null");
         return false; // The wrapper owns cleanup until Place starts.
@@ -268,6 +338,7 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
     ++g_applying_remote;
     attempt.stage = "setup-ghost";
     setup.call(ghost, setup.method);
+    if (creates && !build_corridor_set_reference(ghost,g_ghost_capture.target,nullptr)) return false;
     const BuildGridPoint size{snapshot.geometry.shape[0], snapshot.geometry.shape[1], snapshot.geometry.shape[2]};
     // SetSize returns early for an equal shape. Force fresh storage rather than
     // retaining the prefab's generated cell bindings and auxiliary arrays.
@@ -320,8 +391,10 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
     record->used = true; record->origin = e.origin_id;
     snprintf(record->object_id, sizeof(record->object_id), "%s", e.object_id);
     attempt.stage = "register-ghost";
-    g_corridor_api.set_placement_ghost.call(target, ghost, g_corridor_api.set_placement_ghost.method);
-    if (!build_corridor_set_reference(ghost, a.target, target)) return false;
+    if (!creates) {
+        g_corridor_api.set_placement_ghost.call(target, ghost, g_corridor_api.set_placement_ghost.method);
+        if (!build_corridor_set_reference(ghost, a.target, target)) return false;
+    }
     attempt.stage = "finish-deserialization";
     g_corridor_api.finish_deserialization.call(ghost_base, g_corridor_api.finish_deserialization.method);
     if (!build_corridor_storage_valid(ghost_base, snapshot.geometry)) {
@@ -332,7 +405,7 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
     g_corridor_api.set_ghost_visible.call(c, false, g_corridor_api.set_ghost_visible.method);
     attempt.placed = true; // Place itself can throw after changing the target.
     g_corridor_api.place.call(ghost, g_corridor_api.place.method);
-    g_set_parent.call(transform, target_transform, true, g_set_parent.method);
+    if (!creates) g_set_parent.call(transform, target_transform, true, g_set_parent.method);
     attempt.stage = "set-state";
     g_corridor_api.set_state.call(c, 0, 0, g_corridor_api.set_state.method);
     bool still_constructed = true;
@@ -346,13 +419,27 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
     il2cpp_field_set_value(reinterpret_cast<Il2CppObject*>(c), g_build_amount_field, &amount);
     const uint8_t transitioned = g_corridor_api.set_state.call(c, 1, 0, g_corridor_api.set_state.method);
     --g_applying_remote;
+    if (creates) {
+        il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(ghost),a.target,&target);
+        void* base_uid=build_live(target) ? build_uid(target) : nullptr;
+        if (!base_uid) return false;
+        g_uid_set_id.call(base_uid,created_base_id,g_uid_set_id.method);
+        char actual_id[kWorldEventObjectIdSize]{};
+        const bool id_matches=string_to_ascii(g_unique_get_id.call(base_uid,g_unique_get_id.method),actual_id,sizeof(actual_id)) &&
+            snapshot.target_base_id==actual_id;
+        record->verified=transitioned && id_matches && build_created_base_present(target,e,snapshot);
+        if (record->verified) {build_remember_corridor(e,snapshot);build_record_piece_root(e,target);}
+        LOG_INFO("build: first base created id=%s base=%s tech=%d identity=%u verified=%u",e.object_id,
+            snapshot.target_base_id.c_str(),e.tech_type,unsigned(id_matches),unsigned(record->verified));
+        return record->verified;
+    }
     const BuildGridPoint cell{snapshot.target_offset[0], snapshot.target_offset[1], snapshot.target_offset[2]};
     const uint8_t actual = build_live(target) ?
         g_corridor_api.get_cell.call(target, cell, g_corridor_api.get_cell.method) : 255;
     record->verified = transitioned && actual == base_geometry::piece_cell_type(e.tech_type) && build_corridor_glass_matches(target, cell, e.tech_type);
     if (record->verified && e.tech_type==5509) record->verified=build_foundation_footprint_matches(target,snapshot,false);
     if (record->verified && e.tech_type==5500) record->verified=build_room_footprint_matches(target,snapshot,false);
-    if (record->verified) build_remember_corridor(e, snapshot);
+    if (record->verified) {build_remember_corridor(e,snapshot);build_record_piece_root(e,target);}
     LOG_INFO("build: corridor applied id=%s transition=%u target_cell=%u verified=%u tech=%d",
              e.object_id, static_cast<unsigned>(transitioned), static_cast<unsigned>(actual),
              static_cast<unsigned>(record->verified), e.tech_type);
@@ -400,11 +487,13 @@ bool build_apply_completed_corridor(void* prefab, void* target, const WorldEvent
 
 using BuildClearCellFn = void (*)(void*, BuildGridPoint, void*);
 using BuildDeconstructionAllowedFn = uint8_t (*)(void*, void**, void*);
+using BuildIsEmptyFn = uint8_t (*)(void*,void*);
 struct CorridorRemovalApi {
     bool attempted = false, ready = false;
     void *type = nullptr, *bounds = nullptr, *face = nullptr, *recipe = nullptr;
     Entry<BuildClearCellFn> clear_cell;
-    Entry<ManagedFn> fix_floors, fix_links, rebuild;
+    Entry<ManagedFn> fix_floors, fix_links, rebuild, pre_destroy;
+    Entry<BuildIsEmptyFn> is_empty;
     Entry<BuildDeconstructionAllowedFn> allowed;
 };
 CorridorRemovalApi g_corridor_removal_api;
@@ -414,7 +503,7 @@ bool build_resolve_corridor_removal() {
     auto& a = g_corridor_removal_api;
     if (a.attempted) return a.ready;
     a.attempted = true;
-    if (!build_resolve_corridor_api()) return false;
+    if (!build_resolve_corridor_api() || !g_object_destroy) return false;
     auto* cls = build_class("BaseDeconstructable");
     const void* type = cls ? il2cpp_class_get_type(cls) : nullptr;
     a.type = type ? il2cpp_type_get_object(type) : nullptr;
@@ -426,7 +515,9 @@ bool build_resolve_corridor_removal() {
     a.fix_floors.bind(find_method(g_corridor_api.base, "FixRoomFloors", 0));
     a.fix_links.bind(find_method(g_corridor_api.base, "FixCorridorLinks", 0));
     a.rebuild.bind(find_method(g_corridor_api.base, "RebuildGeometry", 0));
-    a.ready = a.type && a.bounds && a.face && a.recipe && a.allowed && a.clear_cell && a.fix_floors && a.fix_links && a.rebuild;
+    a.is_empty.bind(find_method(g_corridor_api.base,"IsEmpty",0));
+    a.pre_destroy.bind(find_method(g_corridor_api.base,"OnPreDestroy",0));
+    a.ready = a.type && a.bounds && a.face && a.recipe && a.allowed && a.clear_cell && a.fix_floors && a.fix_links && a.rebuild && a.is_empty && a.pre_destroy;
     LOG_INFO("build: corridor removal API %s", a.ready ? "ready" : "unavailable");
     return a.ready;
 }

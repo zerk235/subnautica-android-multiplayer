@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -648,7 +649,7 @@ static bool remove_tree_best_effort(const char* path) {
     return ok && rmdir(path) == 0;
 }
 
-bool world_write_slot(const WorldManifest& manifest) {
+bool world_write_slot(const WorldManifest& manifest,bool preserve_local) {
     if (!g_recv_active || manifest.file_count!=g_manifest.file_count ||
         strcmp(manifest.slot,g_manifest.slot)) return false;
     for(int i=0;i<kWorldFileCount;++i) if(strcmp(manifest.files[i].name,g_manifest.files[i].name) ||
@@ -690,7 +691,7 @@ bool world_write_slot(const WorldManifest& manifest) {
         }
     }
     const bool replace_host_received = existing_slot && S_ISDIR(existing.st_mode) &&
-                                       world_slot_is_host_received(manifest.slot);
+                                       (world_slot_is_host_received(manifest.slot) || preserve_local);
     if (existing_slot && !replace_host_received) {
         LOG_ERROR("world: slot %s already exists without host-received overwrite authority",
                   manifest.slot);
@@ -785,9 +786,30 @@ bool world_write_slot(const WorldManifest& manifest) {
     if (replace_host_received) {
         // Keep only one recoverable prior copy. This path is private to the mod and
         // hidden from the game's plain slot names.
-        if (!remove_tree_best_effort(backup)) {
-            LOG_ERROR("world: cannot clear prior refresh backup for %s", manifest.slot);
-            goto fail;
+        struct stat prior{};
+        if(lstat(backup,&prior)==0) {
+            char marker[640];snprintf(marker,sizeof(marker),"%s/from_host.txt",backup);
+            struct stat marker_info{};
+            const bool peer_backup=lstat(marker,&marker_info)==0 && S_ISREG(marker_info.st_mode) &&
+                marker_info.st_size>0 && marker_info.st_size<256;
+            if(!peer_backup) {
+                // A role switch can replace a former host's native save. Its prior
+                // directory must survive all later ordinary guest refreshes too.
+                char kept[640];bool moved=false;
+                static unsigned counter=0;
+                for(unsigned attempt=0;attempt<32;++attempt) {
+                    snprintf(kept,sizeof(kept),"%s/.snmod_kept_%s_%lld_%d_%u",kSavesRoot,manifest.slot,
+                        static_cast<long long>(time(nullptr)),int(getpid()),++counter);
+                    struct stat occupied{};
+                    if(lstat(kept,&occupied)==0)continue;
+                    if(errno!=ENOENT)break;
+                    if(rename(backup,kept)==0){moved=true;break;}
+                }
+                if(!moved){LOG_ERROR("world: could not preserve the previous native save backup");goto fail;}
+                LOG_INFO("world: native save backup retained at %s",kept);
+            } else if(!remove_tree_best_effort(backup)) {
+                LOG_ERROR("world: cannot clear prior refresh backup for %s",manifest.slot);goto fail;
+            }
         }
         if (rename(dir, backup) != 0) {
             LOG_ERROR("world: backing up old host-received slot %s failed: %s", manifest.slot,

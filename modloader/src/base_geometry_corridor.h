@@ -86,6 +86,20 @@ inline bool supported_existing_piece(const GhostEnvelope& e,int32_t tech) {
         for (int32_t v:*p) if (v < -8192 || v > 8192) return false;
     return true;
 }
+
+// Only recipes that the game itself can place without a target Base may create
+// one. Face modules, ladders and connectors require an existing base.
+inline bool standalone_piece_topology(const GhostEnvelope& e,int32_t tech) {
+    if (tech!=5500 && tech!=5509 && corridor_shape(tech)<0) return false;
+    if (e.ghost_class!=piece_ghost(tech)) return false;
+    auto candidate=e;
+    if (candidate.target_base_id.empty()) candidate.target_base_id="capture-only";
+    return supported_existing_piece(candidate,tech);
+}
+inline bool supported_piece_placement(const GhostEnvelope& e,int32_t tech) {
+    return e.creates_base ? (!e.target_base_id.empty() && e.target_base_id!=e.object_id && standalone_piece_topology(e,tech)) :
+                           supported_existing_piece(e,tech);
+}
 inline bool piece_footprints_overlap(const GhostEnvelope& a,const GhostEnvelope& b) {
     if (a.target_base_id.empty() || a.target_base_id!=b.target_base_id ||
         a.target_base_anchor!=b.target_base_anchor) return false;

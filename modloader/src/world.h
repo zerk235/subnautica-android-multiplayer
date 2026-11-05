@@ -104,7 +104,7 @@ bool world_receive_content_guid(uint8_t out[16]);
 // Writes the received files into a new slot directory under the saves root. Each file is
 // written to a temporary name and renamed into place, so an interrupted transfer can never
 // leave a slot that looks complete but is not. Refuses to touch a slot that already exists.
-bool world_write_slot(const WorldManifest& manifest);
+bool world_write_slot(const WorldManifest& manifest,bool preserve_local=false);
 
 enum WorldSlotCheck {
     kWorldSlotMissing = 0,

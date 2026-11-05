@@ -7,6 +7,8 @@
 
 #include "world.h"
 #include "held_rotation.h"
+#include "held_pose.h"
+#include "session_launch_role.h"
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 #include "base_geometry_envelope.h"
 #endif
@@ -20,9 +22,9 @@ constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 23;  // invalidate stale host world on menu/load/slot changes
+constexpr uint16_t kSessionProtocolVersion = 25;  // first base identity + two-hand held world pose
 #else
-constexpr uint16_t kSessionProtocolVersion = 7;  // complete saved cell handoff (five-entry manifest)
+constexpr uint16_t kSessionProtocolVersion = 8;  // complete saved cell handoff + held world pose
 #endif
 constexpr size_t kMaxSessionCandidates = kMaxPeers;
 
@@ -39,6 +41,8 @@ constexpr uint32_t kFlagUnderwater = 1u << 6;
 constexpr uint32_t kFlagOnSurface = 1u << 7;
 // Tool-in-use moment (knife swing, scanner scan...): the peer plays the use, not just the hold.
 constexpr uint32_t kFlagUsingTool = 1u << 8;
+constexpr uint32_t kFlagToolLight = 1u << 9;
+constexpr uint32_t kFlagHeldWorldPose = 1u << 10;
 
 // Number of Animator float parameters carried in the state packet. The controller has exactly
 // thirteen today and the cap leaves room, but the payload is sized by this constant on both
@@ -70,6 +74,7 @@ struct PeerState {
     uint32_t held_tech;
     HeldRotation held_rotation;
     uint8_t held_rotation_valid;
+    HeldOffset held_offset;
     // Equipment sync (item sync v3): the peer's Foots/Head slot TechTypes plus the suit as a
     // male_geo children bitmask (bit i = child i active, read by the sender off its own
     // hierarchy). The receiver replicates the mask instead of mirroring the local player's
@@ -101,6 +106,7 @@ struct LocalState {
     uint32_t held_tech;
     HeldRotation held_rotation;
     uint8_t held_rotation_valid;
+    HeldOffset held_offset;
     // Worn equipment: suit as a male_geo bitmask (see read_suit_mask), Foots/Head as TechTypes,
     // 0 when the slot is empty. Read on the game thread.
     uint32_t suit_tech;
@@ -197,6 +203,7 @@ bool net_session_is_host();
 // device already has a loaded world. Leave is explicit; returning to the menu is not leave.
 bool net_session_join(uint32_t host_id, const uint8_t session_id[16]);
 void net_session_leave();
+bool net_session_choose_role(SessionLaunchRole role);
 
 // Game-thread context setter. content_guid is the 16-byte gameinfo.json session GUID;
 // pass nullptr when it is not currently available.

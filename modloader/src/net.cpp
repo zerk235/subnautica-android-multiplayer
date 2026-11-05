@@ -29,6 +29,7 @@ void net_note_session_role(bool is_host, uint32_t host_id);
 // Slot auto-load request: raised when a guest slot lands complete, consumed at the main
 // menu. Defined after the internal namespace; set_handoff is the only producer.
 void net_world_autoload_notify(const char* slot, uint32_t generation);
+void net_world_autoload_cancel();
 bool session_world_servable(const char* slot);
 
 namespace {
@@ -144,6 +145,7 @@ struct StatePacket {
     uint8_t environment_id[16];
     HeldRotation held_rotation;
     uint8_t held_rotation_valid;
+    HeldOffset held_offset;
 };
 
 // Piloted-vehicle pose. Packed like every other packet; 72 bytes on the wire.
@@ -350,7 +352,7 @@ struct SessionLeavePacket {
 // If any assert fires, update the Python peers and AGENT_HANDOFF §4 together.
 static_assert(sizeof(PacketHeader) == 8, "header");
 static_assert(sizeof(HelloPacket) == 16, "hello");
-static_assert(sizeof(StatePacket) == 160, "state with interior identity and held orientation");
+static_assert(sizeof(StatePacket) == 172, "state with interior identity and held tool world pose");
 static_assert(sizeof(VehiclePacket) == 72, "vehicle");
 static_assert(sizeof(WorldRequestPacket) == 12, "world request");
 static_assert(sizeof(WorldManifestPacket) == 244, "manifest with saved entity cells");
@@ -1011,6 +1013,8 @@ struct LocalSession {
     bool local_has_world;  // a world is loaded here (from net_session_set_local_world)
     bool local_member;     // this phone belongs to session_id below
     bool local_host;       // this phone is the session's world authority
+    SessionLaunchRole launch_role;
+    bool role_reset_pending;
     bool resume_host_slot; // loaded a peer-received slot after losing in-memory JOIN state
     uint32_t epoch;        // incremented on every host migration; higher wins
     uint32_t host_id;      // current host's peer id (g_local_id when we host)
@@ -1503,6 +1507,12 @@ void send_state(const PeerState& peer, const LocalState& local) {
     packet.held_rotation_valid=local.held_tech && local.held_rotation_valid &&
         held_rotation_normalize(local.held_rotation,&rotation);
     packet.held_rotation=rotation;
+    packet.flags&=~kFlagHeldWorldPose;
+    if (local.held_tech==751 && packet.held_rotation_valid &&
+        (local.flags&kFlagHeldWorldPose) && held_offset_valid(local.held_offset)) {
+        packet.flags|=kFlagHeldWorldPose;
+        packet.held_offset=local.held_offset;
+    }
     send_to(&packet, sizeof(packet), peer.raw);
 }
 
@@ -1776,6 +1786,8 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
                                       !g_session.local_host &&
                                       g_session.local_member;
                 bool allow_new_guid = g_session.world_refresh_pending;
+                const bool preserve_local = expected_valid && g_session.launch_role==kLaunchGuest &&
+                    !g_session.world_active && g_session.join_accepted && !g_session.explicit_leave;
                 memcpy(expected_guid, g_session.content_guid, sizeof(expected_guid));
                 pthread_mutex_unlock(&g_session.lock);
                 // Refresh exception: when the guest is pulling a newer world on purpose
@@ -1792,24 +1804,29 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
                     world_reset_receive();
                 } else {
                     WorldSlotCheck slot_check = world_slot_exists(slot, *manifest);
-                    if (slot_check == kWorldSlotMatches) {
+                    // An explicit guest can have the former host's byte-identical
+                    // native save. It still needs the transaction below: retain the
+                    // native original and commit the guest marker before autoload.
+                    const bool adopt_native = preserve_local && !world_slot_is_host_received(slot);
+                    if (slot_check == kWorldSlotMatches && !adopt_native) {
                         adopt_received_world_identity(g_receive_generation);
                         set_handoff(kWorldHandoffWritten, slot,
                                     "slot already on disk, all manifest files verified");
                         LOG_INFO("world: slot %s exactly matches manifest, skipping write", slot);
                         world_reset_receive();
                         ok = true;
-                    } else if (slot_check == kWorldSlotConflict) {
+                    } else if (slot_check == kWorldSlotConflict ||
+                               (slot_check == kWorldSlotMatches && adopt_native)) {
                         // A slot this device received from a peer earlier may be refreshed by
                         // the same peer's newer copy: that is the "host published a newer
                         // world" flow, and the stale local bytes are exactly what should be
                         // replaced. A slot the game built locally has no marker and the
                         // strict refusal stands.
-                        if (!world_slot_is_host_received(slot)) {
+                        if (!world_slot_is_host_received(slot) && !preserve_local) {
                             set_handoff(kWorldHandoffFailed, slot,
                                         "existing slot conflicts; overwrite is forbidden");
                             world_reset_receive();
-                        } else if (!world_write_slot(*manifest)) {
+                        } else if (!world_write_slot(*manifest,preserve_local)) {
                             set_handoff(kWorldHandoffFailed, slot,
                                         "slot could not be written");
                             world_reset_receive();
@@ -2862,6 +2879,13 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
             peer->held_rotation={0,0,0,1};
             peer->held_rotation_valid=packet.held_tech && packet.held_rotation_valid==1 &&
                 held_rotation_normalize(packet.held_rotation,&peer->held_rotation);
+            peer->flags&=~kFlagHeldWorldPose;
+            peer->held_offset={};
+            if (packet.held_tech==751 && peer->held_rotation_valid &&
+                (packet.flags&kFlagHeldWorldPose) && held_offset_valid(packet.held_offset)) {
+                peer->flags|=kFlagHeldWorldPose;
+                peer->held_offset=packet.held_offset;
+            }
         }
     }
 
@@ -2957,7 +2981,8 @@ void session_auto_join_tick(double now) {
     // transfer when the bytes match, and a newer host generation flows through the
     // refresh path. Blocking the join while the world was live left the phone in a
     // sessionless forever-state with no pose/event sync - the live bug of 2026-10-25.
-    bool eligible = !g_session.active && !g_session.local_member && !g_session.selected &&
+    bool eligible = g_session.launch_role!=kLaunchHost && !g_session.explicit_leave &&
+                    !g_session.active && !g_session.local_member && !g_session.selected &&
                     !g_session.join_request_pending && !g_session.join_accepted &&
                     !g_session.local_has_world && !g_session.local_host &&
                     (!g_session.world_active || resume_host_slot) &&
@@ -3011,6 +3036,7 @@ void session_auto_join_tick(double now) {
     // Re-check under the lock: an explicit join may have landed meanwhile.
     if (!g_session.active && !g_session.local_member && !g_session.selected &&
         !g_session.join_request_pending && !g_session.join_accepted &&
+        g_session.launch_role!=kLaunchHost && !g_session.explicit_leave &&
         !g_session.local_has_world && !g_session.local_host &&
         (!g_session.world_active || g_session.resume_host_slot) &&
         now >= g_session.leave_cooldown_until && now >= g_session.join_retry_after) {
@@ -3063,7 +3089,15 @@ void process_session_tick(double now) {
         memset(g_session.session_id, 0, sizeof(g_session.session_id));
         g_session.host_id = 0;
         g_session.presence_dirty = true;
-        g_session.leave_cooldown_until = now + 30.0;
+        const bool role_reset=g_session.role_reset_pending;
+        g_session.role_reset_pending=false;
+        g_session.leave_cooldown_until = role_reset ? 0.0 : now + 30.0;
+        if (role_reset) {
+            g_session.local_has_world=false;g_session.world_active=false;
+            g_session.resume_host_slot=false;g_session.content_guid_valid=false;
+            g_session.slot[0]=0;g_session.epoch=0;g_session.election_started=0;
+            g_session.world_request_last=0;g_session.join_retry_after=0;
+        }
         g_session.host_world_gen_seen = 0;
         g_session.world_refresh_pending = false;
         session_set_state_locked(kSessionDiscovering, kJoinAccepted, "left session");
@@ -3187,6 +3221,7 @@ void process_session_tick(double now) {
             pthread_mutex_unlock(&g_peers_lock);
         }
         world_reset_receive();
+        net_world_autoload_cancel();
         set_handoff(kWorldHandoffIdle, "", "left session");
         return;
     }
@@ -3258,7 +3293,8 @@ void process_session_tick(double now) {
     uint32_t max_epoch = 0;
     pthread_mutex_lock(&g_session.lock);
     max_epoch = g_session.epoch;
-    bool local_candidate = g_session.local_has_world && g_session.local_member &&
+    bool local_candidate = g_session.launch_role!=kLaunchGuest &&
+                          g_session.local_has_world && g_session.local_member &&
                           g_session.content_guid_valid;
     pthread_mutex_unlock(&g_session.lock);
     if (local_candidate) best_id = g_local_id;
@@ -3822,129 +3858,9 @@ void net_session_leave() {
 }
 
 #include "session_world_context.inc"
+#include "session_launch_role.inc"
 
-void net_session_set_local_world(bool has_world, const char* slot,
-                                 const uint8_t content_guid[16]) {
-    if (!has_world) {
-        pthread_mutex_lock(&g_session.lock);
-        g_session.world_active = false;
-        if (g_session.local_host) {
-            g_session.local_host = false;
-            g_session.host_id = 0;
-        }
-        g_session.local_has_world = false;
-        if (g_session.local_member) {
-            g_session.election_started = monotonic_seconds();
-            session_set_state_locked(kSessionWaitingForWorld, kJoinAccepted,
-                                     "local world unloaded");
-        }
-        g_session.presence_dirty = true;
-        pthread_mutex_unlock(&g_session.lock);
-        return;
-    }
-
-    if (!slot || !*slot || strlen(slot) >= sizeof(g_session.slot) ||
-        !content_guid || !bytes_nonzero(content_guid, 16)) {
-        LOG_ERROR("session: refusing world context with invalid slot/content GUID");
-        return;
-    }
-    bool received_from_host = world_slot_is_host_received(slot);
-    pthread_mutex_lock(&g_session.lock);
-    g_session.world_active = true;
-    if (g_session.active && g_session.local_member) {
-        if (g_session.local_host) {
-            // Host is the world authority: an autosave that cycles the world guid is a
-            // legitimate host-side update (the host_offer_refresh_tick republish path),
-            // never a conflict - adopting it quietly keeps the host demote-free.
-            memcpy(g_session.content_guid, content_guid, sizeof(g_session.content_guid));
-            g_session.content_guid_valid = true;
-        } else if (g_session.content_guid_valid &&
-                   !same_content(g_session.content_guid, content_guid)) {
-            session_set_state_locked(kSessionConflict, kJoinStaleSession,
-                                     "loaded world content GUID conflicts with selected session");
-            g_session.local_has_world = false;
-            pthread_mutex_unlock(&g_session.lock);
-            return;
-        }
-        if (g_session.slot[0] && strcmp(g_session.slot, slot) != 0) {
-            session_set_state_locked(kSessionConflict, kJoinStaleSession,
-                                     "loaded slot name differs from session slot");
-            g_session.local_has_world = false;
-            pthread_mutex_unlock(&g_session.lock);
-            return;
-        }
-        g_session.local_has_world = true;
-        g_session.resume_host_slot = false;
-        memcpy(g_session.content_guid, content_guid, sizeof(g_session.content_guid));
-        g_session.content_guid_valid = true;
-        snprintf(g_session.slot, sizeof(g_session.slot), "%s", slot);
-        if (g_session.local_host) {
-            session_set_state_locked(kSessionHost, kJoinAccepted, "host");
-        } else if (g_session.host_id) {
-            session_set_state_locked(kSessionGuest, kJoinAccepted, "guest");
-        } else {
-            session_set_state_locked(kSessionWaitingForWorld, kJoinAccepted,
-                                     "world loaded; awaiting host election");
-            if (g_session.election_started == 0.0)
-                g_session.election_started = monotonic_seconds() -
-                                             kElectionConvergenceSeconds;
-        }
-        g_session.presence_dirty = true;
-        pthread_mutex_unlock(&g_session.lock);
-        return;
-    }
-
-    if (!g_session.active && !g_session.local_member && received_from_host) {
-        // The save can outlive the process that accepted its JOIN. Do not turn that guest's
-        // downloaded world into a new host session on restart. Keep it loaded locally, but
-        // advertise no session/world membership until it has returned to menu and rejoined
-        // the matching host. This preserves the host as the save authority.
-        g_session.local_has_world = false;
-        g_session.local_host = false;
-        g_session.resume_host_slot = true;
-        memcpy(g_session.content_guid, content_guid, sizeof(g_session.content_guid));
-        g_session.content_guid_valid = true;
-        snprintf(g_session.slot, sizeof(g_session.slot), "%s", slot);
-        if (!g_session.selected && !g_session.join_request_pending) {
-            g_session.join_accepted = false;
-            g_session.host_id = 0;
-            g_session.epoch = 0;
-            memset(g_session.session_id, 0, sizeof(g_session.session_id));
-            session_set_state_locked(kSessionDiscovering, kJoinAccepted,
-                                     "host-received world; waiting to rejoin its session");
-        }
-        g_session.presence_dirty = true;
-        pthread_mutex_unlock(&g_session.lock);
-        LOG_WARN("session: loaded host-received slot %s without JOIN state; "
-                 "waiting for its host instead of creating a new session", slot);
-        return;
-    }
-
-    g_session.active = true;
-    g_session.local_member = true;
-    g_session.local_has_world = true;
-    g_session.local_host = true;
-    g_session.resume_host_slot = false;
-    g_session.epoch = 1;
-    g_session.host_id = g_local_id;
-    memset(g_session.session_id, 0, sizeof(g_session.session_id));
-    random_bytes(g_session.session_id, sizeof(g_session.session_id));
-    if (!bytes_nonzero(g_session.session_id, sizeof(g_session.session_id)))
-        g_session.session_id[0] = 1;
-    memcpy(g_session.content_guid, content_guid, sizeof(g_session.content_guid));
-    g_session.content_guid_valid = true;
-    snprintf(g_session.slot, sizeof(g_session.slot), "%s", slot);
-    g_session.selected = false;
-    g_session.join_accepted = false;
-    g_session.join_request_pending = false;
-    g_session.last_host_presence = monotonic_seconds();
-    g_session.election_started = 0.0;
-    g_session.presence_dirty = true;
-    session_set_state_locked(kSessionHost, kJoinAccepted, "new host session");
-    pthread_mutex_unlock(&g_session.lock);
-    LOG_INFO("session: created host session epoch=1 slot=%s content-guid=%02x%02x%02x%02x",
-             slot, content_guid[0], content_guid[1], content_guid[2], content_guid[3]);
-}
+#include "session_local_world.inc"
 
 void net_session_set_world_active(bool active) {
     pthread_mutex_lock(&g_session.lock);

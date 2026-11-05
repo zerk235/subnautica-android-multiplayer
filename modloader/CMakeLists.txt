@@ -60,6 +60,7 @@ target_link_options(shadowhook_static PRIVATE -Wl,-z,max-page-size=16384)
 
 add_library(snmod SHARED
     src/main.cpp
+    src/launch_role_bridge.cpp
     src/log.cpp
     src/hooks.cpp
     src/il2cpp_api.cpp

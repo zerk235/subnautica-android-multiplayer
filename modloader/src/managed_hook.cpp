@@ -14,7 +14,9 @@
 #include "hooks.h"
 #include "il2cpp_api.h"
 #include "log.h"
+#include "launch_role_bridge.h"
 #include "net.h"
+#include "held_light.h"
 #include "base_geometry_envelope.h"
 #include "base_geometry_cache.h"
 #include "base_geometry_corridor.h"
@@ -226,6 +228,13 @@ struct RemoteAvatar {
     // TechType the prop currently corresponds to, held_retry the frame after which a failed
     // source lookup may run again.
     void* held_prop;
+    void* held_lights_parent;
+    void* held_lights[8];
+    bool held_light_enabled[8];
+    unsigned held_light_count;
+    bool held_body_pose;
+    bool held_world_ik_bound;
+    void *held_arms,*held_left_ik,*held_right_ik;
     void* held_plug_origin;
     bool held_native_grip;
     bool held_use_palm;
@@ -462,6 +471,8 @@ void* g_remote_arms[kMaxAvatars] = {nullptr};
 ManagedFn g_arms_update_original = nullptr;
 Entry<VoidFn> g_arms_update_hand_ik_weights;
 Entry<ReconfigureFn> g_arms_reconfigure;
+using WorldIKTargetsFn=void (*)(void*,void*,void*,void*);
+Entry<WorldIKTargetsFn> g_arms_world_targets;
 Entry<FloatArgFn> g_arm_aiming_update;
 Entry<GetPropBoolFn> g_anim_get_root_motion;
 Entry<GetPropBoolFn> g_go_get_active_self;
@@ -806,6 +817,7 @@ void resolve_arms_ik_api(void* arms) {
     if (!g_arms_reconfigure) {
         g_arms_reconfigure.bind(find_method(klass, "Reconfigure", 1));
     }
+    if (!g_arms_world_targets) g_arms_world_targets.bind(find_method(klass,"SetWorldIKTarget",2));
     if (!g_arm_aiming_update) {
         void* left = *reinterpret_cast<void**>(reinterpret_cast<char*>(arms) +
                                                 kArmsLeftAimOffset);
@@ -2044,6 +2056,7 @@ void clear_driven_vehicles();
 void cache_avatar_hand(RemoteAvatar* avatar);
 void follow_avatar_held_prop(RemoteAvatar* avatar);
 void apply_peer_held_rotation(RemoteAvatar* avatar,const PeerState& peer);
+void apply_peer_held_light(RemoteAvatar* avatar,const PeerState& peer);
 
 void destroy_avatar(RemoteAvatar* avatar) {
     if (!avatar->used) return;
@@ -3093,6 +3106,7 @@ void update_peer_avatars(void* player_self) {
         update_avatar_held_prop(avatar, peer.held_tech);
         follow_avatar_held_prop(avatar);
         apply_peer_held_rotation(avatar,peer);
+        apply_peer_held_light(avatar,peer);
     }
 
     // Remote vehicles ride on the same peer list: teleport + kinematic + pilot tracking.
@@ -3468,6 +3482,7 @@ void* g_fpmodel_world_field=nullptr;
 void* g_fpmodel_view_field=nullptr;
 Entry<GetBoundsFn> g_held_renderer_bounds;
 void* g_tool_right_ik_field=nullptr;
+void* g_tool_left_ik_field=nullptr;
 void* g_arms_hand_field=nullptr;
 void* g_arms_attach_field=nullptr;
 // Held v3 prop cleanup. Colliders anywhere in the prop subtree are switched off through the
@@ -5977,11 +5992,17 @@ void* find_prop_source(uint32_t tech) {
     return find_prefab_source(tech);
 }
 
+void clear_held_body_ik(RemoteAvatar* avatar);
 void destroy_held_prop(RemoteAvatar* avatar) {
+    clear_held_body_ik(avatar);
     if (avatar->held_prop && g_destroy) {
         g_destroy.call(avatar->held_prop, g_destroy.method);
     }
     avatar->held_prop = nullptr;
+    avatar->held_lights_parent=nullptr;
+    avatar->held_light_count=0;
+    avatar->held_body_pose=false;
+    avatar->held_arms=avatar->held_left_ik=avatar->held_right_ik=nullptr;
     avatar->held_plug_origin=nullptr;
     avatar->held_native_grip=false;
     avatar->held_grip_socket=nullptr;
@@ -6180,6 +6201,8 @@ void snap_prop_to_hand(void* prop_tf, void* hand_tf, uint32_t tech) {
 #include "held_equipped_model.inc"
 #include "held_palm.inc"
 #include "held_rotation_apply.inc"
+#include "held_light.inc"
+#include "held_body_pose.inc"
 
 // Camera-mounted tools define the wrist pose with rightHandIKTarget. Hand-mounted
 // tools instead use plugOrigin and the palm socket. Keep both clone-owned anchors.
@@ -6209,7 +6232,13 @@ void cache_avatar_hand(RemoteAvatar* avatar) {
 
 bool place_avatar_prop(RemoteAvatar* avatar,void* prop_tf,void* grip) {
     void* wrist=avatar->held_grip_socket;
-    if (!avatar->held_use_palm) return plug_visual_to_hand(prop_tf,grip,wrist);
+    if (!avatar->held_use_palm) {
+        bool aligned=plug_visual_to_hand(prop_tf,grip,wrist);
+        avatar->held_palm_local=Vector3{}; // authored IK target is the wrist
+        avatar->held_palm_local_valid=aligned;
+        avatar->held_received_rotation=false;
+        return aligned;
+    }
     Vector3 palm=g_get_position.call(wrist,g_get_position.method);
     unsigned samples=0;
     bool measured=visual_palm_center(avatar->game_object,wrist,&palm,&samples);
@@ -6225,12 +6254,27 @@ bool place_avatar_prop(RemoteAvatar* avatar,void* prop_tf,void* grip) {
 
 void read_local_held_rotation(void* player,LocalState* local) {
     local->held_rotation_valid=0;
-    if (!player || !local->held_tech || !g_get_rotation || !g_arms_hand_field || !g_get_go_transform ||
+    local->flags&=~kFlagHeldWorldPose;
+    local->held_offset={};
+    if (!player || !local->held_tech || !g_get_rotation || !g_get_position || !g_get_go_transform ||
         !g_get_game_object || !g_inventory_get_held || !g_pickup_get_tech ||
-        !g_inventory_class || !il2cpp_field_get_value || !g_arms_type_obj) return;
+        !g_inventory_class || !il2cpp_field_get_value) return;
     void* inventory=read_static_object_field(g_inventory_class,"main");
     void* held=inventory ? g_inventory_get_held.call(inventory,g_inventory_get_held.method) : nullptr;
     if (!held || g_pickup_get_tech.call(held,g_pickup_get_tech.method)!=local->held_tech) return;
+    void* tool_go=g_get_game_object.call(held,g_get_game_object.method);
+    void* tool=tool_go ? g_get_go_transform.call(tool_go,g_get_go_transform.method) : nullptr;
+    if (!tool) return;
+    if (local->held_tech==751 && local->valid) {
+        auto p=g_get_position.call(tool,g_get_position.method);
+        auto q=g_get_rotation.call(tool,g_get_rotation.method);
+        local->held_offset={p.x-local->x,p.y-local->y,p.z-local->z};
+        local->held_rotation_valid=held_offset_valid(local->held_offset) &&
+            held_rotation_normalize({q.x,q.y,q.z,q.w},&local->held_rotation);
+        if (local->held_rotation_valid) local->flags|=kFlagHeldWorldPose;
+        return;
+    }
+    if (!g_arms_hand_field || !g_arms_type_obj) return;
     void* player_go=g_get_game_object.call(player,g_get_game_object.method);
     void* root=player_go ? g_get_go_transform.call(player_go,g_get_go_transform.method) : nullptr;
     if (!root) return;
@@ -6238,9 +6282,6 @@ void read_local_held_rotation(void* player,LocalState* local) {
     void* wrist=nullptr;
     if (arms) il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(arms),g_arms_hand_field,&wrist);
     if (!prop_owns_transform(root,wrist)) return;
-    void* tool_go=g_get_game_object.call(held,g_get_game_object.method);
-    void* tool=tool_go ? g_get_go_transform.call(tool_go,g_get_go_transform.method) : nullptr;
-    if (!tool) return;
     Quaternion hand_q=g_get_rotation.call(wrist,g_get_rotation.method);
     Quaternion tool_q=g_get_rotation.call(tool,g_get_rotation.method);
     local->held_rotation_valid=held_rotation_relative({hand_q.x,hand_q.y,hand_q.z,hand_q.w},
@@ -6251,7 +6292,9 @@ void read_local_held_rotation(void* player,LocalState* local) {
 }
 
 void apply_peer_held_rotation(RemoteAvatar* avatar,const PeerState& peer) {
-    if (!avatar->held_prop || !avatar->held_native_grip || !avatar->held_use_palm ||
+    if (avatar->held_prop && avatar->held_body_pose) {apply_held_body_pose(avatar,peer);return;}
+    if (peer.held_tech==751 && (peer.flags&kFlagHeldWorldPose)) return;
+    if (!avatar->held_prop || !avatar->held_native_grip ||
         !avatar->held_palm_local_valid || !peer.held_rotation_valid || peer.held_tech!=avatar->held_tech) return;
     HeldRotation q{};
     if (!held_rotation_normalize(peer.held_rotation,&q)) return;
@@ -6305,6 +6348,7 @@ void report_held_visual(RemoteAvatar* avatar) {
 // Authored grips follow the hand through Unity's hierarchy, including Animator/IK
 // updates later in the frame. Root fallback is only for props without an owned grip.
 void follow_avatar_held_prop(RemoteAvatar* avatar) {
+    if (avatar->held_body_pose) return;
     if (!avatar->held_prop || !g_get_go_transform || !g_get_position || !g_set_position) return;
     void* hand_tf = avatar->held_grip_socket ? avatar->held_grip_socket : avatar->held_hand;
     if (!hand_tf) return;
@@ -6393,6 +6437,7 @@ bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
     avatar->held_visual_reported=false;
     void* plug=nullptr;
     void* right_ik=nullptr;
+    void* left_ik=nullptr;
     int32_t socket=-1;
     // Read the authored references before removing either gameplay component.
     void* tool=find_component_in_hierarchy(prop,g_playertool_type_obj,g_playertool_name_str,0);
@@ -6400,12 +6445,15 @@ bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
         auto* object=reinterpret_cast<Il2CppObject*>(tool);
         if (g_plug_origin_field) il2cpp_field_get_value(object,g_plug_origin_field,&plug);
         if (g_tool_right_ik_field) il2cpp_field_get_value(object,g_tool_right_ik_field,&right_ik);
+        if (g_tool_left_ik_field) il2cpp_field_get_value(object,g_tool_left_ik_field,&left_ik);
         if (g_tool_socket_field) il2cpp_field_get_value(object,g_tool_socket_field,&socket);
     }
-    void* grip=select_visual_grip(prop_tf,plug,right_ik,socket);
-    bool wrist_grip=(socket==1 && right_ik && grip==right_ik);
+    void* grip=select_visual_grip(prop_tf,plug,right_ik,socket,tech);
+    bool wrist_grip=(right_ik && grip==right_ik && prop_owns_transform(prop_tf,right_ik));
     LOG_INFO("held source: peer=%08x tech=%u tool=%p socket=%d plug=%p rightIK=%p selected=%p wrist=%u",
         avatar->id,tech,tool,socket,plug,right_ik,grip,unsigned(wrist_grip));
+    bool controlled_light=prepare_remote_held_light(avatar,prop,tech);
+    avatar->held_body_pose=prepare_held_body_pose(avatar,prop_tf,left_ik,right_ik,tech);
     if (g_pickupable_type) {
         void* pickupable=g_get_component.call(prop,g_pickupable_type,g_get_component.method);
         if (pickupable && g_object_destroy_immediate) g_object_destroy_immediate.call(pickupable,g_object_destroy_immediate.method);
@@ -6415,7 +6463,7 @@ bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
     else if (tool) g_object_destroy.call(tool,g_object_destroy.method);
     // Lights die too: a flashlight/seaglide prop would otherwise carry a live spotlight into
     // the clone's hand. Bounded loop because a deferred Destroy would return the same light.
-    if (g_light_type_obj && g_get_component && !g_get_component_is_string) {
+    if (!controlled_light && g_light_type_obj && g_get_component && !g_get_component_is_string) {
         for (int k = 0; k < 8; k++) {
             void* lamp = find_component_in_hierarchy(prop, g_light_type_obj, nullptr, 0);
             if (!lamp) break;
@@ -6436,13 +6484,13 @@ bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
     // body root). The prop is placed in world space afterwards because the source's local
     // transform was relative to wherever it lay in the world, not relative to a hand. The
     // per-frame follow re-asserts this every frame, so even a missed SetParent stays glued.
-    void* parent_tf = wrist_grip && avatar->held_hand_bone ? avatar->held_hand_bone : avatar->held_hand;
+    void* parent_tf = avatar->held_body_pose ? avatar->transform : wrist_grip && avatar->held_hand_bone ? avatar->held_hand_bone : avatar->held_hand;
     avatar->held_grip_socket=parent_tf;
     if (prop_tf && parent_tf && g_set_parent) {
         g_set_parent.call(prop_tf, parent_tf, false, g_set_parent.method);
     }
-    if (prop_tf && parent_tf) {
-        avatar->held_use_palm=(socket==0 && avatar->held_hand_bone==parent_tf);
+    if (prop_tf && parent_tf && !avatar->held_body_pose) {
+        avatar->held_use_palm=(!wrist_grip && socket==0 && avatar->held_hand_bone==parent_tf);
         // Builder FP root lies inside its wide housing, not inside the handle.
         // Rest-skinned stock asset places the narrow handle at +X, 6-15 cm.
         // Apply this measured point only to that viewmodel without an authored plug.
@@ -6460,7 +6508,7 @@ bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
         LOG_INFO("held grip: peer=%08x tech=%u native=%u plug=%p",avatar->id,tech,
                  unsigned(avatar->held_native_grip),avatar->held_plug_origin);
     }
-    g_set_active.call(prop, true, g_set_active.method);
+    g_set_active.call(prop, !avatar->held_body_pose, g_set_active.method);
     avatar->held_prop = prop;
     LOG_INFO("held prop: peer %08x now carries tech %u (source=%p prop=%p parent=%p)", avatar->id,
              tech, source, prop, parent_tf);
@@ -6571,6 +6619,7 @@ void resolve_item_api() {
     g_fpmodel_view_field=build_field_on(fpmodel,"viewModel",0x28);
     g_tool_socket_field=build_field_on(playertool,"socket",0x84);
     g_tool_right_ik_field=build_field_on(playertool,"rightHandIKTarget",0x90);
+    g_tool_left_ik_field=build_field_on(playertool,"leftHandIKTarget",0xA0);
     auto* arms_class=find_class_in_domain("","ArmsController");
     g_arms_hand_field=build_field_on(arms_class,"rightHand",0x80);
     g_arms_attach_field=build_field_on(arms_class,"rightHandAttach",0x70);
@@ -6601,6 +6650,11 @@ void resolve_item_api() {
     if (light && il2cpp_class_get_type && il2cpp_type_get_object) {
         g_light_type_obj = il2cpp_type_get_object(il2cpp_class_get_type(light));
     }
+    auto* toggle_lights=find_class_in_domain("","ToggleLights");
+    if (toggle_lights && il2cpp_class_get_type && il2cpp_type_get_object)
+        g_toggle_lights_type=il2cpp_type_get_object(il2cpp_class_get_type(toggle_lights));
+    g_toggle_lights_parent=build_field_on(toggle_lights,"lightsParent",0x20);
+    g_toggle_lights_active=build_field_on(toggle_lights,"lightsActive",0x5C);
     // GameObject.set_layer for the same walk (see the SetLayerFn typedef).
     struct Il2CppClass* prop_go = find_class_in_domain("UnityEngine", "GameObject");
     if (prop_go) {
@@ -6780,6 +6834,7 @@ void hooked_player_update(void* self, void* method) {
     // What the quickslot hand carries, so the peers can hang a copy of it on their avatar.
     local.held_tech = read_held_tech();
     read_local_held_rotation(self,&local);
+    read_local_held_light(&local);
     read_avatar_environment(self,&local);
     // What the body wears, so the peers can dress their avatar in the real suit/fins/head.
     read_equipment(&local.suit_tech, &local.fins_tech, &local.head_tech);
@@ -7051,6 +7106,7 @@ void world_context_tick(void* manager) {
             g_world_context_generation,slot,unsigned(loading),unsigned(at_menu));
     }
     if(at_menu) net_session_set_world_active(false);
+    launch_role_bridge_tick(at_menu);
 }
 void hooked_slm_update(void* self, void* method) {
     if (g_slm_update_original) g_slm_update_original(self, method);
