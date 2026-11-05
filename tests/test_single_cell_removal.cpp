@@ -45,7 +45,7 @@ bool build_corridor_glass_matches(void*,BuildGridPoint,int32_t){return glass_ok;
 void clear(void*,BuildGridPoint,void*){++writes;if(throw_clear)throw std::runtime_error("native");if(!corrupt_clear)current=0;}
 void rebuild(void*,void*){++rebuilds;}
 uint8_t allowed(void* p,void**,void*){return static_cast<Candidate*>(p)->allowed;}
-uint8_t empty(void*,void*){return current==0 && cell_array.data[1]==0;}
+uint8_t empty(void*,void* ignore,void*){assert(ignore==nullptr);return current==0 && cell_array.data[1]==0;}
 void pre_destroy(void*,void*){++pre_destroys;}
 void destroy(void*,void*){++destroys;}
 Entry<decltype(&destroy)>g_object_destroy{&destroy};
