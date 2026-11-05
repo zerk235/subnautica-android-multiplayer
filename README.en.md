@@ -8,14 +8,18 @@ This is a public preview demo. The Android installer passed a clean game install
 
 ## Download and install
 
-**[Download installer 0.3.1 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.1-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.1-installer-preview)
+**[Download installer 0.3.2 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.2-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.2-installer-preview)
 
-**0.3.1 adds diagnostics:** stable error codes, explanations and next steps, persisted
-exception details, and a shareable ZIP with installation information and game logs
-through authorized Shizuku. For sync issues, collect reports on both phones and name
-the host. Missing logs are explicitly reported. [Report guide (Russian)](docs/DIAGNOSTICS.md).
-If your game already has the 0.3.0 mod, update **only the installer over the existing
-app**. Repatching the game is unnecessary: the native mod and protocol 25 are unchanged.
+**0.3.2 fixes base demolition and repeat joining.** Two complete build/dismantle
+cycles of a new standalone straight corridor passed on the two test phones.
+Signing-key replacement is checked for Android clone conflicts before preparation;
+the installer can re-register an existing game in the current profile.
+Update the installer over the existing app, keep its data, save and exit to the
+game menu, then **Prepare mod → Install prepared mod on both phones**. The native
+mod changed; protocol remains 25, and both players need matching mod builds.
+Do not manually uninstall the game to bypass a clone warning.
+[Release notes (Russian)](docs/releases/0.3.2-installer-preview.md).
+Diagnostics from 0.3.1 remain available: [report guide (Russian)](docs/DIAGNOSTICS.md).
 
 **November 5 update:** the installer now has **“Запустить хостом” (Launch as host)**
 and **“Подключиться гостем” (Join as guest)**. A non-root phone can host a previously
@@ -59,7 +63,7 @@ and the local key needed for future updates. Full steps are in the
 
 Tested game version: **1.22.83315**, Android **arm64-v8a**. Both phones need matching game and mod builds. Other game versions and larger sessions are unverified.
 
-Choose **Launch as host** on one phone, load and save a world, then choose **Join as guest** on the other and leave it in the main menu. Save and return to the main menu on both phones before switching roles. For the initial demo test, build and save the initial base before connecting the guest. Standalone new bases remain experimental: foundation appearance was tested, but removing the last piece is still broken. Fish, complete ecosystem simulation, all held items and all animations are not synchronized. Remote flashlight on/off was tested; Seaglide placement still needs work. Internet matchmaking is not implemented.
+Choose **Launch as host** on one phone, load and save a world, then choose **Join as guest** on the other and leave it in the main menu. Save and return to the main menu on both phones before switching roles. For the initial demo test, build and save the initial base before connecting the guest. Standalone new bases remain experimental: two straight-corridor build/remove cycles passed in 0.3.2; final-foundation and all room variants still need live testing after this fix. Fish, complete ecosystem simulation, all held items and all animations are not synchronized. Remote flashlight on/off was tested; Seaglide placement still needs work. Internet matchmaking is not implemented.
 
 See the Russian [play guide](docs/PLAYING.md), [compatibility matrix](docs/COMPATIBILITY.md), [build instructions](docs/BUILDING.md) and [demo roadmap](docs/ROADMAP.md).
 
