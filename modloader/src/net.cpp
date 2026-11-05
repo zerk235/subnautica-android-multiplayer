@@ -462,7 +462,8 @@ static void* WatchdogMain(void*) {
 // net_offer_world() on the way in and the net_world_handoff_* accessors on the way out.
 // ---------------------------------------------------------------------------
 
-int send_to(const void* data, size_t size, const struct sockaddr_in& addr);
+int send_to(const void* data, size_t size, const struct sockaddr_in& addr,
+            int* error_out = nullptr);
 
 struct OfferFile {
     char name[32];
@@ -981,11 +982,30 @@ struct RemotePresence {
     double last_presence;                   // pump timestamp of the last valid packet
     bool join_accepted;  // WE accepted this peer's join (host side): its world requests
                          // are served and its events/state are synced
+    // Host-issued admission survives reordered pre-JOIN presence packets. Bind it to
+    // the exact session/epoch, independently of what the guest currently advertises.
+    uint8_t admitted_session[16];
+    uint32_t admitted_epoch;
     uint64_t last_join_nonce;  // nonce of the last answered JOIN (idempotent repeats)
     bool cached_reply_valid;
     JoinReplyPacket cached_reply;  // exact bytes to resend on a repeated nonce
 };
 RemotePresence g_remote[kMaxPeers];
+
+bool join_grant_matches(const RemotePresence& remote, const uint8_t session[16], uint32_t epoch) {
+    return remote.join_accepted && remote.admitted_epoch == epoch &&
+           memcmp(remote.admitted_session, session, 16) == 0;
+}
+
+// Pump-owned counters, separate from the wire/public peer snapshot. HELLO alone must not
+// be mistaken for a healthy pose stream. Report both sending and receiving per peer.
+struct PoseStreamStats {
+    unsigned long long tx_ok, tx_failed, rx_seen, rx_applied, rx_blocked, rx_stale;
+    double last_rx, last_applied;
+    int last_send_errno;
+    const char* last_rx_block;
+};
+PoseStreamStats g_pose_stream[kMaxPeers]{};
 
 void init_peers_lock() {
     pthread_mutexattr_t attr;
@@ -998,6 +1018,7 @@ void init_peers_lock() {
 // The pump thread reads this snapshot, the game thread writes it.
 pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
 LocalState g_local{};
+double g_local_publish_at = 0.0;
 uint64_t g_local_serial = 0;
 // Piloted-vehicle snapshot, same discipline: written every frame while driving.
 VehicleState g_local_vehicle{};
@@ -1130,6 +1151,8 @@ void session_set_state_locked(SessionState state, SessionJoinStatus reason, cons
     g_session.reason = reason;
     snprintf(g_session.detail, sizeof(g_session.detail), "%s", detail ? detail : "");
     g_session.presence_dirty = true;
+    LOG_INFO("session state: state=%d reason=%d detail=%s", int(state), int(reason),
+             g_session.detail);
 }
 
 bool random_bytes(uint8_t* out, size_t size) {
@@ -1221,6 +1244,13 @@ PeerState* claim_peer(uint32_t id, const struct sockaddr_in& addr, double now) {
     if (existing) {
         // A peer that only says hello must stay alive too, and its address can change
         // when it reconnects from a different port.
+        if (existing->raw.sin_addr.s_addr != addr.sin_addr.s_addr ||
+            existing->raw.sin_port != addr.sin_port) {
+            char address[16]{};
+            fill_address(addr, address);
+            LOG_INFO("peer endpoint: %08x %s:%u -> %s:%u", id, existing->address,
+                     existing->port, address, ntohs(addr.sin_port));
+        }
         existing->last_seen = now;
         existing->port = ntohs(addr.sin_port);
         existing->raw = addr;
@@ -1232,6 +1262,7 @@ PeerState* claim_peer(uint32_t id, const struct sockaddr_in& addr, double now) {
         if (g_peers[i].active) continue;
         memset(&g_peers[i], 0, sizeof(g_peers[i]));
         memset(&g_remote[i], 0, sizeof(g_remote[i]));
+        g_pose_stream[i] = {};
         g_peers[i].active = true;
         g_peers[i].id = id;
         g_peers[i].port = ntohs(addr.sin_port);
@@ -1251,13 +1282,19 @@ PeerState* claim_peer(uint32_t id, const struct sockaddr_in& addr, double now) {
 // cause next to an otherwise working link is the app sitting in the background: Android blocks
 // the socket with EPERM until it is foregrounded again, and one line per interval says that.
 constexpr double kSendErrorInterval = 15.0;
-int send_to(const void* data, size_t size, const struct sockaddr_in& addr) {
-    if (g_socket < 0) return -1;
+int send_to(const void* data, size_t size, const struct sockaddr_in& addr,
+            int* error_out) {
+    if (error_out) *error_out = 0;
+    if (g_socket < 0) {
+        if (error_out) *error_out = EBADF;
+        return -1;
+    }
     int sent = static_cast<int>(sendto(g_socket, data, size, 0,
                                         reinterpret_cast<const struct sockaddr*>(&addr),
                                         sizeof(addr)));
     if (sent < 0) {
         int err = errno;
+        if (error_out) *error_out = err;
         char key[64];
         snprintf(key, sizeof(key), "%s:%u", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
 
@@ -1449,34 +1486,9 @@ void send_session_presence() {
     pthread_mutex_unlock(&g_session.lock);
 }
 
-bool session_peer_eligible_locked(size_t index, bool require_world) {
-    // Caller holds g_peers_lock. Lock order is always peers -> session if both are needed.
-    if (index >= kMaxPeers || !g_peers[index].active) return false;
-    double now = monotonic_seconds();
-    if (now - g_peers[index].last_seen > kPeerTimeout) return false;
-    const RemotePresence& remote = g_remote[index];
-    if (!remote.valid || !remote.protocol_v3 ||
-        now - remote.last_presence > kPeerTimeout ||
-        !(remote.flags & kSessionFlagMember)) return false;
-    if (require_world && !(remote.flags & kSessionFlagHasWorld)) return false;
-    bool local_member = false;
-    bool local_world = false;
-    uint32_t local_epoch = 0;
-    uint32_t local_host = 0;
-    uint8_t local_id[16];
-    pthread_mutex_lock(&g_session.lock);
-    local_member = g_session.local_member;
-    local_world = g_session.local_has_world;
-    local_epoch = g_session.epoch;
-    local_host = g_session.host_id;
-    memcpy(local_id, g_session.session_id, sizeof(local_id));
-    pthread_mutex_unlock(&g_session.lock);
-    return local_member && (!require_world || local_world) &&
-           remote.epoch == local_epoch && remote.host_id == local_host &&
-           same_session(remote.session_id, local_id);
-}
+#include "session_peer_gate.inc"
 
-void send_state(const PeerState& peer, const LocalState& local) {
+int send_state(const PeerState& peer, const LocalState& local, int* error_out) {
     StatePacket packet{};
     packet.header.magic = kMagic;
     packet.header.type = kPacketState;
@@ -1513,7 +1525,7 @@ void send_state(const PeerState& peer, const LocalState& local) {
         packet.flags|=kFlagHeldWorldPose;
         packet.held_offset=local.held_offset;
     }
-    send_to(&packet, sizeof(packet), peer.raw);
+    return send_to(&packet, sizeof(packet), peer.raw, error_out);
 }
 
 void send_vehicle(const PeerState& peer, const VehicleState& vehicle) {
@@ -1561,7 +1573,7 @@ bool authorize_world_sender(uint32_t id, const struct sockaddr_in& addr, bool fr
             // The original host records JOIN acceptance directly. After migration, a
             // surviving SESSION_MEMBER proves prior admission through the shared session
             // roster; its refreshed Presence must name this host and epoch.
-            bool accepted_member = remote.join_accepted ||
+            bool accepted_member = join_grant_matches(remote, g_session.session_id, g_session.epoch) ||
                                    (g_session.epoch > 1 &&
                                     (remote.flags & kSessionFlagMember));
             authorized = same && g_session.local_host && accepted_member &&
@@ -2385,8 +2397,10 @@ void handle_presence_locked(const uint8_t* data, size_t size,
         return;
     }
 
-    bool was_join_accepted = remote.join_accepted &&
-                             same_session(remote.session_id, packet.session_id);
+    bool was_join_accepted = remote.join_accepted;
+    uint8_t admitted_session[16];
+    memcpy(admitted_session, remote.admitted_session, sizeof(admitted_session));
+    uint32_t admitted_epoch = remote.admitted_epoch;
     uint64_t old_nonce = remote.last_join_nonce;
     bool old_cache_valid = remote.cached_reply_valid;
     JoinReplyPacket old_reply = remote.cached_reply;
@@ -2407,6 +2421,8 @@ void handle_presence_locked(const uint8_t* data, size_t size,
     memcpy(remote.mod_version, packet.mod_version, sizeof(remote.mod_version));
     remote.last_presence = now;
     remote.join_accepted = was_join_accepted;
+    memcpy(remote.admitted_session, admitted_session, sizeof(remote.admitted_session));
+    remote.admitted_epoch = admitted_epoch;
     remote.last_join_nonce = old_nonce;
     remote.cached_reply_valid = old_cache_valid;
     remote.cached_reply = old_reply;
@@ -2523,12 +2539,11 @@ void handle_join_request_locked(const uint8_t* data, size_t size,
     } else {
         size_t members = 1;
         for (size_t i = 0; i < kMaxPeers; ++i) {
-            if (g_peers[i].active && g_remote[i].join_accepted &&
-                same_session(g_remote[i].session_id, current_session)) {
+            if (g_peers[i].active && join_grant_matches(g_remote[i], current_session, current_epoch)) {
                 ++members;
             }
         }
-        if (!remote.join_accepted) ++members;
+        if (!join_grant_matches(remote, current_session, current_epoch)) ++members;
         if (members > kMaxPeers + 1) status = kJoinFull;
     }
 
@@ -2557,6 +2572,8 @@ void handle_join_request_locked(const uint8_t* data, size_t size,
     remote.cached_reply_valid = true;
     if (status == kJoinAccepted) {
         remote.join_accepted = true;
+        memcpy(remote.admitted_session, current_session, sizeof(remote.admitted_session));
+        remote.admitted_epoch = current_epoch;
         remote.flags |= kSessionFlagMember;
         remote.flags &= ~kSessionFlagHasWorld;
         remote.host_id = g_local_id;
@@ -2836,8 +2853,17 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
         PeerState* peer = claim_peer(packet.id, addr, now);
         if (peer) {
             int peer_index = peer_index_by_id(packet.id);
-            if (peer_index < 0 ||
-                !session_peer_eligible_locked(static_cast<size_t>(peer_index), true)) {
+            if (peer_index < 0) {
+                pthread_mutex_unlock(&g_peers_lock);
+                return;
+            }
+            PoseStreamStats& stream = g_pose_stream[peer_index];
+            ++stream.rx_seen;
+            stream.last_rx = now;
+            const char* blocked = session_peer_block_reason_locked(peer_index, true);
+            if (blocked) {
+                ++stream.rx_blocked;
+                stream.last_rx_block = blocked;
                 pthread_mutex_unlock(&g_peers_lock);
                 return;
             }
@@ -2851,9 +2877,12 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
             bool fresh = !peer->seq_valid ||
                          static_cast<int32_t>(packet.sequence - peer->sequence) > 0;
             if (!fresh) {
+                ++stream.rx_stale;
                 pthread_mutex_unlock(&g_peers_lock);
                 return;
             }
+            ++stream.rx_applied;
+            stream.last_applied = now;
             peer->sequence = packet.sequence;
             peer->seq_valid = true;
             peer->x = packet.x;
@@ -3384,6 +3413,7 @@ void* pump_main(void* unused) {
     uint8_t buffer[2048];
     uint64_t iterations = 0;
     double next_report = monotonic_seconds() + 5.0;
+    double next_pose_report = monotonic_seconds() + 15.0;
 
     while (g_pump_running) {
         g_pump_beat_ms = MonotonicMs();
@@ -3458,8 +3488,10 @@ void* pump_main(void* unused) {
         }
 
         LocalState local{};
+        double local_published_at = 0.0;
         pthread_mutex_lock(&g_state_lock);
         local = g_local;
+        local_published_at = g_local_publish_at;
         pthread_mutex_unlock(&g_state_lock);
 
         if (local.valid) {
@@ -3469,7 +3501,15 @@ void* pump_main(void* unused) {
                 if (!g_peers[i].active) continue;
                 if (!session_peer_eligible_locked(i, true)) continue;
                 if (now - g_peers[i].last_sent < kStateInterval) continue;
-                send_state(g_peers[i], local);
+                PoseStreamStats& stream = g_pose_stream[i];
+                int send_errno = 0;
+                const int sent = send_state(g_peers[i], local, &send_errno);
+                if (sent == sizeof(StatePacket)) {
+                    ++stream.tx_ok;
+                } else {
+                    ++stream.tx_failed;
+                    stream.last_send_errno = send_errno;
+                }
                 g_peers[i].last_sent = now;
             }
             pthread_mutex_unlock(&g_peers_lock);
@@ -3517,6 +3557,44 @@ void* pump_main(void* unused) {
                      net_world_event_tx(), net_world_event_rx(), net_world_event_dup(),
                      net_pending_world_event_count());
             next_report = now + 5.0;
+        }
+        if (now >= next_pose_report) {
+            pthread_mutex_lock(&g_peers_lock);
+            pthread_mutex_lock(&g_session.lock);
+            LOG_INFO("pose session: local=%08x host=%08x epoch=%u member=%d world=%d "
+                     "role_host=%d state=%d detail=%s", g_local_id, g_session.host_id,
+                     g_session.epoch, g_session.local_member, g_session.local_has_world,
+                     g_session.local_host, int(g_session.state), g_session.detail);
+            pthread_mutex_unlock(&g_session.lock);
+            for (size_t i = 0; i < kMaxPeers; ++i) {
+                if (!g_peers[i].active) continue;
+                const PoseStreamStats& stream = g_pose_stream[i];
+                const char* block = session_peer_block_reason_locked(i, true);
+                if (!local.valid) block = "local_pose_invalid";
+                LOG_INFO("pose stream: peer=%08x endpoint=%s:%u tx_ok=%llu tx_failed=%llu "
+                         "send_errno=%d tx_gate=%s sample_age=%.1f presence_age=%.1f "
+                         "rx_seen=%llu rx_applied=%llu rx_blocked=%llu rx_stale=%llu "
+                         "rx_age=%.1f applied_age=%.1f last_rx_block=%s flags=%x pos=%.2f/%.2f/%.2f "
+                         "remote_flags=%x remote_host=%08x remote_epoch=%u protocol_ok=%d "
+                         "game_match=%d mod_match=%d join_granted=%d grant_epoch=%u",
+                         g_peers[i].id, g_peers[i].address, g_peers[i].port,
+                         stream.tx_ok, stream.tx_failed, stream.last_send_errno,
+                         block ? block : "open",
+                         local_published_at > 0.0 ? now - local_published_at : -1.0,
+                         g_remote[i].valid ? now - g_remote[i].last_presence : -1.0,
+                         stream.rx_seen, stream.rx_applied, stream.rx_blocked, stream.rx_stale,
+                         stream.last_rx > 0.0 ? now - stream.last_rx : -1.0,
+                         stream.last_applied > 0.0 ? now - stream.last_applied : -1.0,
+                         stream.last_rx_block ? stream.last_rx_block : "none",
+                         g_peers[i].flags, g_peers[i].x, g_peers[i].y, g_peers[i].z,
+                         g_remote[i].flags, g_remote[i].host_id, g_remote[i].epoch,
+                         g_remote[i].valid && g_remote[i].protocol_v3,
+                         strcmp(g_remote[i].game_build, kGameBuild) == 0,
+                         strcmp(g_remote[i].mod_version, kModVersion) == 0,
+                         g_remote[i].join_accepted, g_remote[i].admitted_epoch);
+            }
+            pthread_mutex_unlock(&g_peers_lock);
+            next_pose_report = now + 15.0;
         }
         sleep_millis(10);
     }
@@ -3659,6 +3737,7 @@ void net_init() {
 void net_publish(const LocalState& local) {
     pthread_mutex_lock(&g_state_lock);
     g_local = local;
+    g_local_publish_at = monotonic_seconds();
     pthread_mutex_unlock(&g_state_lock);
 }
 

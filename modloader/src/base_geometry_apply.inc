@@ -115,47 +115,7 @@ bool build_base_id_exists(const std::string& id) {
 
 #include "base_foundation_readback.inc"
 
-// An exact ID is essential: proximity alone can attach a corridor to the wrong base.
-void* build_corridor_target(const std::string& expected_id, const std::array<int32_t, 3>& expected_anchor,bool require_anchor=true) {
-    if (!build_resolve_corridor_api() || expected_id.empty()) return nullptr;
-    void* list = g_find_objects_all.call(g_build_base_geometry_type, true, g_find_objects_all.method);
-    if (!list) return nullptr;
-    const int32_t count = g_array_get_length.call(list, g_array_get_length.method);
-    void* found = nullptr;
-    bool anchor_matches = false;
-    static double next_report=0;
-    for (int32_t i = 0; i < count; ++i) {
-        void* candidate = g_array_get_value.call(list, i, g_array_get_value.method);
-        if (!build_live(candidate)) continue;
-        bool is_ghost = false, is_placed = false;
-        il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate), g_corridor_api.base_is_ghost, &is_ghost);
-        il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate), g_corridor_api.base_is_placed, &is_placed);
-        void* uid = build_uid(candidate);
-        char id[kWorldEventObjectIdSize]{};
-        if (!uid || !string_to_ascii(g_unique_get_id.call(uid, g_unique_get_id.method), id, sizeof(id)) ||
-            expected_id != id) continue;
-        if(is_ghost || !is_placed) {
-            if(build_now()>=next_report){next_report=build_now()+5;LOG_INFO("build: target deferred id=%s ghost=%u placed=%u",id,unsigned(is_ghost),unsigned(is_placed));}
-            continue;
-        }
-        if (found) return nullptr; // duplicate IDs are ambiguous even if only one anchor matches
-        found = candidate;
-        int32_t anchor[3]{};
-        il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate), g_ghost_capture.anchor, anchor);
-        anchor_matches = anchor[0] == expected_anchor[0] && anchor[1] == expected_anchor[1] &&
-                         anchor[2] == expected_anchor[2];
-        if(require_anchor && !anchor_matches && build_now()>=next_report) {
-            next_report=build_now()+5;
-            LOG_INFO("build: target anchor deferred id=%s actual=(%d,%d,%d) expected=(%d,%d,%d)",id,anchor[0],anchor[1],anchor[2],expected_anchor[0],expected_anchor[1],expected_anchor[2]);
-        }
-    }
-    if (!found || (require_anchor && !anchor_matches)) return nullptr;
-    void* current_ghost = nullptr;
-    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(found), g_corridor_api.placement_ghost,
-                           &current_ghost);
-    if(build_live(current_ghost) && build_now()>=next_report){next_report=build_now()+5;LOG_INFO("build: target busy id=%s placement=%p",expected_id.c_str(),current_ghost);}
-    return build_live(current_ghost) ? nullptr : found;
-}
+#include "base_target_lookup.inc"
 
 bool build_corridor_copy_array(void* base, void* field, const std::vector<uint8_t>& bytes) {
     void* array = nullptr;
@@ -485,41 +445,6 @@ bool build_apply_completed_corridor(void* prefab, void* target, const WorldEvent
     return verified;
 }
 
-using BuildClearCellFn = void (*)(void*, BuildGridPoint, void*);
-using BuildDeconstructionAllowedFn = uint8_t (*)(void*, void**, void*);
-using BuildIsEmptyFn = uint8_t (*)(void*,void*);
-struct CorridorRemovalApi {
-    bool attempted = false, ready = false;
-    void *type = nullptr, *bounds = nullptr, *face = nullptr, *recipe = nullptr;
-    Entry<BuildClearCellFn> clear_cell;
-    Entry<ManagedFn> fix_floors, fix_links, rebuild, pre_destroy;
-    Entry<BuildIsEmptyFn> is_empty;
-    Entry<BuildDeconstructionAllowedFn> allowed;
-};
-CorridorRemovalApi g_corridor_removal_api;
-bool g_corridor_removal_failed = false;
-
-bool build_resolve_corridor_removal() {
-    auto& a = g_corridor_removal_api;
-    if (a.attempted) return a.ready;
-    a.attempted = true;
-    if (!build_resolve_corridor_api() || !g_object_destroy) return false;
-    auto* cls = build_class("BaseDeconstructable");
-    const void* type = cls ? il2cpp_class_get_type(cls) : nullptr;
-    a.type = type ? il2cpp_type_get_object(type) : nullptr;
-    a.bounds = build_field_on(cls, "bounds", 0x24);
-    a.face = build_field_on(cls, "face", 0x3C);
-    a.recipe = build_field_on(cls, "recipe", 0x60);
-    a.allowed.bind(find_method(cls, "DeconstructionAllowed", 1));
-    a.clear_cell.bind(build_typed_method(g_corridor_api.base, "ClearCell", 1, "Int3"));
-    a.fix_floors.bind(find_method(g_corridor_api.base, "FixRoomFloors", 0));
-    a.fix_links.bind(find_method(g_corridor_api.base, "FixCorridorLinks", 0));
-    a.rebuild.bind(find_method(g_corridor_api.base, "RebuildGeometry", 0));
-    a.is_empty.bind(find_method(g_corridor_api.base,"IsEmpty",0));
-    a.pre_destroy.bind(find_method(g_corridor_api.base,"OnPreDestroy",0));
-    a.ready = a.type && a.bounds && a.face && a.recipe && a.allowed && a.clear_cell && a.fix_floors && a.fix_links && a.rebuild && a.is_empty && a.pre_destroy;
-    LOG_INFO("build: corridor removal API %s", a.ready ? "ready" : "unavailable");
-    return a.ready;
-}
+#include "base_corridor_removal_api.inc"
 
 #include "base_corridor_remove.inc"

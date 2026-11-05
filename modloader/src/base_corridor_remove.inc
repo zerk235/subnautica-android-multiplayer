@@ -75,7 +75,7 @@ bool build_apply_corridor_removal_inner(void* target, const WorldEvent& e,
         // Same single-cell and repair methods called by BaseDeconstructable.Deconstruct
         // (2A919E4, 2A91AF8, 2A91B04, 2A91B10), with no temporary resource ghost.
         a.clear_cell.call(target, cell, a.clear_cell.method);
-        if (may_remove_last && a.is_empty.call(target,a.is_empty.method)) {
+        if (may_remove_last && a.is_empty.call(target,nullptr,a.is_empty.method)) {
             // Same final-base branch as native BaseDeconstructable.Deconstruct:
             // IsEmpty -> OnPreDestroy -> Destroy(gameObject). No resource ghost.
             stage="pre-destroy";a.pre_destroy.call(target,a.pre_destroy.method);
