@@ -17,7 +17,11 @@ import java.util.UUID;
 public final class MainActivity extends Activity {
     TextView game, status, note, savesNote, diagnosticsNote;
     Button prepare, install, launch, cancel, backup, restore, remove, export, importCopy;
-    Button launchHost,launchGuest;
+    Button launchHost,launchGuest,recoverGame;
+    JSONObject profileState;
+    String profileError;
+    boolean profilePending;
+    long profileCheckedAt;
     Button diagnose,shareReport,saveReport,errorDetails;
     String removalToken;
     final Shizuku.OnRequestPermissionResultListener permissionResult=(request,result)->render();
@@ -34,8 +38,12 @@ public final class MainActivity extends Activity {
         scroll.addView(body); setContentView(scroll);
         text(body, "SUBNAUTICA", 14, Color.rgb(79, 216, 206));
         text(body, "Android Multiplayer", 28, Color.WHITE);
-        text(body, "Установка мода · 0.3.1-preview", 14, Color.LTGRAY);
+        text(body, "Установка мода · 0.3.2-preview", 14, Color.LTGRAY);
         game = text(body, "", 16, Color.WHITE);
+        recoverGame=button(body,"Вернуть игру в текущий профиль");
+        recoverGame.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("Вернуть установленную копию игры?")
+            .setMessage("Через Shizuku вернём в этот профиль уже имеющийся APK с прежней подписью. Клон и его миры останутся на месте. Это не перенос сохранений: после возвращения игры восстановите проверенную ZIP-копию миров.")
+            .setNegativeButton("Отмена",null).setPositiveButton("Вернуть игру",(d,w)->start("recover-game")).show());
         text(body,"Совместная игра",20,Color.rgb(79,216,206));
         text(body,"Выбери роль этого телефона. Для игры нужна одна Wi-Fi сеть и одинаковая сборка мода на обоих устройствах.",16,Color.LTGRAY);
         launchHost=button(body,"Запустить хостом");
@@ -288,6 +296,8 @@ public final class MainActivity extends Activity {
             if(info==null && saved!=null && !getSharedPreferences("status",0).getBoolean("restoreRequired",false))
                 getSharedPreferences("status",0).edit().putBoolean("restoreRequired",true).apply();
             String access=SaveBridge.readiness(); boolean needsRestore=worlds.needsRestore();
+            recoverGame.setVisibility(info==null && engine.retained()!=null?View.VISIBLE:View.GONE);
+            recoverGame.setEnabled(!busy && pending<0 && access==null);
             updateText(savesNote,(access==null?"Shizuku: доступ предоставлен.":access)+"\n"+(saved==null?"Проверенной копии миров пока нет.":"Копия: "+saved.getInt("files")+" файлов, "+(saved.getLong("bytes")/1024)+" КиБ. "+(needsRestore?"После замены игры нужно восстановление.":"Копия хранится отдельно от игры.")));
             backup.setEnabled(!busy && pending<0 && info!=null && access==null && !needsRestore);
             restore.setEnabled(!busy && pending<0 && info!=null && saved!=null && access==null);
@@ -295,31 +305,55 @@ public final class MainActivity extends Activity {
             importCopy.setEnabled(!busy && pending<0);
             prepare.setEnabled(!busy && info != null && pending < 0);
             String blocker = engine.installBlocker(plan);
-            remove.setEnabled(!busy && pending<0 && info!=null && plan!=null && plan.getBoolean("full") && blocker!=null && saved!=null && access==null);
+            boolean replacement=plan!=null && engine.removalBlocker(plan)==null;
+            if(replacement && access==null && !busy) refreshProfiles();
+            boolean onlyCurrent=profileState!=null && profileState.optBoolean("currentInstalled")
+                && profileState.getJSONArray("installedUsers").length()==1 && profileError==null
+                && SystemClock.elapsedRealtime()-profileCheckedAt<15000;
+            remove.setEnabled(!busy && pending<0 && replacement && onlyCurrent && saved!=null && access==null);
             install.setEnabled(!busy && plan != null && blocker == null && pending < 0);
             cancel.setVisibility(pending < 0 ? View.GONE : View.VISIBLE);
             cancel.setEnabled(!busy);
             String noteValue=plan == null ? (planError == null ? "После подготовки здесь станет доступна установка." : planError) : (blocker == null
                 ? "Файлы проверены. Android запросит разрешение и подтверждение установки."
                 : blocker);
+            if(replacement && access==null && !onlyCurrent) noteValue=profileError!=null?profileError
+                :profileState==null?"Проверка профилей Android перед заменой подписи…"
+                :"Игра установлена также в другом профиле Android или клоне. Удаление заблокировано: новая подпись не заменит этот пакет. Клон и его миры сохраняются.";
             launch.setEnabled(!busy && info != null && !needsRestore);
             launchHost.setEnabled(launch.isEnabled());launchGuest.setEnabled(launch.isEnabled());
             if(needsRestore) noteValue="Мод установлен. Восстановите миры из проверенной копии перед запуском игры.";
             updateText(note,noteValue);
-            if(removalToken!=null && removalToken.equals(getSharedPreferences("status",0).getString("removalToken",""))
-                && System.currentTimeMillis()-getSharedPreferences("status",0).getLong("removalReadyAt",0)<60000) {
+            if(!busy && removalToken!=null && removalToken.equals(getSharedPreferences("status",0).getString("removalToken",""))) {
                 removalToken=null;
+                long age=SystemClock.elapsedRealtime()-getSharedPreferences("status",0).getLong("removalReadyAt",0);
+                String identity=getSharedPreferences("status",0).getString("removalIdentity","");
                 getSharedPreferences("status",0).edit().remove("removalToken").apply();
-                startActivity(new Intent(Intent.ACTION_DELETE,Uri.parse("package:"+PatchEngine.GAME)));
+                if(!busy && replacement && onlyCurrent && age>=0 && age<10000 && identity.equals(engine.removalIdentity())) {
+                    Diagnostics.event(this,"request_game_removal","verified current-profile identity and fresh one-use grant");
+                    startActivity(new Intent(Intent.ACTION_DELETE,Uri.parse("package:"+PatchEngine.GAME)));
+                } else PatchService.status(this,"Проверка удаления устарела или установка изменилась. Игра не удалена; повторите проверку.");
             }
             updateText(status,getSharedPreferences("status", 0).getString("message", "Готов к подготовке. Сначала сохраните игру."));
         } catch (Exception e) {
             prepare.setEnabled(!PatchService.BUSY.get()); install.setEnabled(false);
             remove.setEnabled(false); restore.setEnabled(false); backup.setEnabled(false); launch.setEnabled(false);
             launchHost.setEnabled(false);launchGuest.setEnabled(false);
+            recoverGame.setEnabled(false);
             updateText(note,e.getMessage());
             updateText(status,getSharedPreferences("status", 0).getString("message", "Нужна повторная подготовка."));
         }
+    }
+    void refreshProfiles() {
+        if(profilePending || SystemClock.elapsedRealtime()-profileCheckedAt<10000 && profileCheckedAt!=0) return;
+        profilePending=true;
+        new Thread(()->{
+            JSONObject state=null; String error=null;
+            try(SaveBridge bridge=new SaveBridge(this)) { state=bridge.call(SaveAccessService.PROFILE_STATE,null,false); }
+            catch(Exception failure) { error=failure.getMessage(); }
+            final JSONObject checked=state; final String problem=error;
+            handler.post(()->{ profileState=checked; profileError=problem; profileCheckedAt=SystemClock.elapsedRealtime(); profilePending=false; });
+        },"snmp-profiles").start();
     }
     int dp(int value) { return (int)(getResources().getDisplayMetrics().density * value + .5f); }
     TextView text(LinearLayout body, String value, int size, int color) {

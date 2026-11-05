@@ -8,7 +8,8 @@ import java.io.*;
 /** Shizuku UserService. Only this installer's UID and fixed game paths are allowed. */
 public final class SaveAccessService extends Binder {
     static final String DESCRIPTOR="io.github.zerk235.snmp.installer.SaveAccess.v1";
-    static final int SNAPSHOT=1, CHECK=2, RESTORE=3, CHECK_REMOVAL=4, CHECK_PROFILES=5, DIAGNOSTICS=6;
+    static final int SNAPSHOT=1, CHECK=2, RESTORE=3, CHECK_REMOVAL=4, CHECK_PROFILES=5, DIAGNOSTICS=6,
+        PROFILE_STATE=7, RECOVER_GAME=8;
     final int owner;
     final File saves;
     public SaveAccessService(Context context) {
@@ -24,7 +25,18 @@ public final class SaveAccessService extends Binder {
         data.enforceInterface(DESCRIPTOR);
         try {
             JSONObject result;
-            if(code==DIAGNOSTICS) {
+            if(code==PROFILE_STATE) {
+                result=profiles().json(owner/100000);
+            } else if(code==RECOVER_GAME) {
+                int user=owner/100000;
+                GameProfiles before=profiles(); before.requireRecovery(user);
+                // Re-register the existing, identically signed APK; never uninstall any profile.
+                String output=command("/system/bin/cmd","package","install-existing","--user",String.valueOf(user),"--wait",PatchEngine.GAME);
+                GameProfiles after=profiles();
+                if(!after.installed.contains(user) || !after.installed.containsAll(before.installed))
+                    throw new IOException("Android не подтвердил восстановление игры в текущем профиле: "+output);
+                result=after.json(user).put("verified",true);
+            } else if(code==DIAGNOSTICS) {
                 // Read-only: no force-stop, save access or arbitrary caller-provided path/command.
                 try(ParcelFileDescriptor fd=ParcelFileDescriptor.CREATOR.createFromParcel(data)) {
                     result=DiagnosticLogs.capture(saves.getParentFile(),new ParcelFileDescriptor.AutoCloseOutputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),true,owner/100000);
@@ -69,15 +81,9 @@ public final class SaveAccessService extends Binder {
         if(output.contains("Exception")) throw new IOException("Не удалось остановить игру");
     }
     static void checkProfiles(String dump,int user) throws IOException {
-        java.util.regex.Matcher matches=java.util.regex.Pattern.compile("(?m)^\\s*User (\\d+):[^\\r\\n]*\\binstalled=true\\b").matcher(dump);
-        boolean own=false;
-        while(matches.find()) {
-            int id=Integer.parseInt(matches.group(1));
-            if(id!=user) throw new IOException("Subnautica также установлена в профиле Android "+id+" (возможно, клон). Новая подпись будет конфликтовать с ним. Удаление текущей игры заблокировано; другие профили и их миры не меняем.");
-            own=true;
-        }
-        if(!own) throw new IOException("Не удалось подтвердить текущий профиль игры. Удаление заблокировано");
+        new GameProfiles(dump).requireOnly(user);
     }
+    GameProfiles profiles() throws Exception { return new GameProfiles(command("/system/bin/dumpsys","package",PatchEngine.GAME)); }
     static String command(String... args) throws Exception {
         java.lang.Process process=new ProcessBuilder(args).redirectErrorStream(true).start();
         java.util.concurrent.FutureTask<byte[]> read=new java.util.concurrent.FutureTask<>(()->ApkPatcher.readSmall(process.getInputStream(),2*1024*1024));

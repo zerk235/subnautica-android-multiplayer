@@ -49,6 +49,20 @@ public final class PatchService extends Service {
                     File report=Diagnostics.create(this,intent.getStringExtra("category"),intent.getStringExtra("description"),true);
                     status(this,"Диагностический ZIP готов. Нажмите «Отправить ZIP» или «Сохранить диагностический ZIP». Получите такой же отчёт со второго телефона при проблеме синхронизации.");
                 } else if ("install".equals(action)) install(engine, progress);
+                else if("recover-game".equals(action)) {
+                    if(engine.installed()!=null || engine.retained()==null) throw new IOException("Восстановление регистрации игры сейчас не требуется");
+                    SaveManager worlds=new SaveManager(this);
+                    if(worlds.latest()!=null) worlds.verify();
+                    String cert=PatchEngine.certificate(engine.retained());
+                    getSharedPreferences("status",0).edit().putBoolean("restoreRequired",true).commit();
+                    try(SaveBridge bridge=new SaveBridge(this)) {
+                        JSONObject result=bridge.call(SaveAccessService.RECOVER_GAME,null,false);
+                        Diagnostics.event(this,"game_profile_recovered",result.toString());
+                    }
+                    if(!cert.equals(PatchEngine.certificate(engine.installed()))) throw new IOException("Не удалось подтвердить подпись восстановленной игры");
+                    status(this,worlds.latest()!=null?"Игра возвращена в текущий профиль без удаления клона. Теперь восстановите миры из проверенной копии перед запуском."
+                        :"Игра возвращена в текущий профиль без удаления клона. Если есть ZIP миров, импортируйте и восстановите его перед запуском.");
+                }
                 else if("backup".equals(action)) {
                     status(this,"Копирование миров и проверка SHA256…");
                     JSONObject record=new SaveManager(this).backup();
@@ -58,9 +72,11 @@ public final class PatchService extends Service {
                     JSONObject report=new SaveManager(this).restore();
                     status(this,"Миры восстановлены: "+report.getInt("files")+" файлов, SHA256 совпал. Можно открывать игру. Прежняя папка и резервная копия сохранены.");
                 } else if("check-removal".equals(action)) {
+                    getSharedPreferences("status",0).edit().remove("removalToken").commit();
                     new SaveManager(this).checkRemoval(progress);
                     getSharedPreferences("status",0).edit().putString("removalToken",intent.getStringExtra("token"))
-                        .putLong("removalReadyAt",System.currentTimeMillis()).apply();
+                        .putString("removalIdentity",engine.removalIdentity())
+                        .putLong("removalReadyAt",SystemClock.elapsedRealtime()).apply();
                     status(this,"APK и актуальная копия миров проверены. Подтвердите удаление старой игры в системном окне.");
                 }
                 else {

@@ -27,8 +27,16 @@ final class PatchEngine {
     }
 
     PackageInfo installed() throws Exception {
-        try { return context.getPackageManager().getPackageInfo(GAME, PackageManager.GET_SIGNING_CERTIFICATES); }
+        try {
+            PackageInfo info=context.getPackageManager().getPackageInfo(GAME, PackageManager.GET_SIGNING_CERTIFICATES);
+            return installedHere(info,android.os.Process.myUid()/100000)?info:null;
+        }
         catch (PackageManager.NameNotFoundException e) { return null; }
+    }
+    static boolean installedHere(PackageInfo info,int user) {
+        return info!=null && info.applicationInfo!=null
+            && (info.applicationInfo.flags & ApplicationInfo.FLAG_INSTALLED)!=0
+            && info.applicationInfo.uid/100000==user;
     }
     PackageInfo retained() throws Exception {
         try { return context.getPackageManager().getPackageInfo(GAME,PackageManager.GET_SIGNING_CERTIFICATES|PackageManager.MATCH_UNINSTALLED_PACKAGES); }
@@ -52,6 +60,10 @@ final class PatchEngine {
         String sourceCert = certificate(game);
         LocalSigner signer = new LocalSigner();
         boolean full = !sourceCert.equals(signer.fingerprint());
+        // Detect a clone conflict before spending time preparing a replacement or offering deletion.
+        if(full && SaveBridge.readiness()==null) try(SaveBridge bridge=new SaveBridge(context)) {
+            bridge.call(SaveAccessService.CHECK_PROFILES,null,false);
+        }
         JSONObject modInfo = payload();
         byte[] mod = ApkPatcher.readSmall(context.getAssets().open("libsnmod.so"), 16 * 1024 * 1024);
         String modSha = ApkPatcher.hex(MessageDigest.getInstance("SHA-256").digest(mod));
@@ -136,6 +148,36 @@ final class PatchEngine {
         if (current.getLongVersionCode() != plan.getLong("versionCode") || !GAME_VERSION.equals(current.versionName))
             return "Версия установленной игры изменилась. Подготовьте мод заново";
         return null;
+    }
+
+    String removalBlocker(JSONObject plan) throws Exception {
+        PackageInfo game=installed();
+        if(game==null || plan==null || !plan.getBoolean("full") || !GAME_VERSION.equals(game.versionName)
+            || game.getLongVersionCode()!=plan.getLong("versionCode") || certificate(game).equals(plan.getString("cert")))
+            return "Удаление для этой установки не требуется. Подготовьте мод заново при изменении игры.";
+        if(new SaveManager(context).needsRestore()) return "Сначала восстановите предыдущую копию миров";
+        return null;
+    }
+
+    String removalIdentity() throws Exception {
+        PackageInfo info=installed();
+        if(info==null) throw new IOException("Игра не найдена в текущем профиле");
+        return info.applicationInfo.uid+":"+info.getLongVersionCode()+":"+certificate(info)+":"+info.applicationInfo.sourceDir;
+    }
+
+    void verifyInstalled(JSONObject plan) throws Exception {
+        PackageInfo info=installed();
+        if(info==null || context.getPackageManager().getLaunchIntentForPackage(GAME)==null)
+            throw new IOException("Игра не найдена в текущем профиле после установки. Проверьте восстановление игры из другого профиля Android");
+        if(info.getLongVersionCode()!=plan.getLong("versionCode") || !certificate(info).equals(plan.getString("cert")))
+            throw new IOException("Подпись или версия игры после установки не совпала с подготовленным пакетом");
+        try(java.util.zip.ZipFile apk=new java.util.zip.ZipFile(info.applicationInfo.sourceDir)) {
+            java.util.zip.ZipEntry entry=apk.getEntry(ApkPatcher.MAIN);
+            if(entry==null) throw new IOException("Установленный APK не содержит библиотеку мода");
+            byte[] library=ApkPatcher.readSmall(apk.getInputStream(entry),16*1024*1024);
+            if(!ApkPatcher.hex(MessageDigest.getInstance("SHA-256").digest(library)).equals(payload().getString("sha256")))
+                throw new IOException("SHA256 установленной библиотеки мода не совпал с подготовленной сборкой");
+        }
     }
 
     List<File> verifyPlan(JSONObject plan, ApkPatcher.Progress progress) throws Exception {

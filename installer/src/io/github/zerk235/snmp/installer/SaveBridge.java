@@ -9,9 +9,11 @@ import java.io.*;
 import java.util.concurrent.*;
 
 final class SaveBridge implements AutoCloseable {
+    static final Semaphore SERVICE_LOCK=new Semaphore(1,true);
     final Shizuku.UserServiceArgs args;
     final ServiceConnection connection;
     IBinder binder;
+    boolean locked;
     static String readiness() {
         try {
             if(!Shizuku.pingBinder()) return "Запустите Shizuku и вернитесь сюда";
@@ -22,29 +24,49 @@ final class SaveBridge implements AutoCloseable {
     }
     SaveBridge(Context context) throws Exception {
         String blocked=readiness(); if(blocked!=null) throw new IOException(blocked);
+        if(!SERVICE_LOCK.tryAcquire(25,TimeUnit.SECONDS)) throw new IOException("Служба Shizuku занята другой проверкой. Повторите операцию");
+        locked=true;
         CountDownLatch ready=new CountDownLatch(1);
         args=new Shizuku.UserServiceArgs(new ComponentName(context,SaveAccessService.class))
-            .tag("snmp-save-backup-v1").version(3).daemon(false).processNameSuffix("save_access");
+            .tag("snmp-save-backup-v1").version(4).daemon(false).processNameSuffix("save_access");
         connection=new ServiceConnection() {
             public void onServiceConnected(ComponentName name,IBinder service) { binder=service; ready.countDown(); }
             public void onServiceDisconnected(ComponentName name) { binder=null; }
         };
-        Shizuku.bindUserService(args,connection);
-        if(!ready.await(20,TimeUnit.SECONDS) || binder==null) { close(); throw new IOException("Не удалось подключить службу копирования Shizuku"); }
+        try {
+            Shizuku.bindUserService(args,connection);
+            if(!ready.await(20,TimeUnit.SECONDS) || binder==null) throw new IOException("Не удалось подключить службу копирования Shizuku");
+        } catch(Exception error) { close(); throw error; }
     }
     JSONObject call(int operation,File archive,boolean write) throws Exception {
+        if(archive==null) {
+            if(operation!=SaveAccessService.PROFILE_STATE && operation!=SaveAccessService.RECOVER_GAME && operation!=SaveAccessService.CHECK_PROFILES)
+                throw new IOException("Для этой операции требуется архив");
+            return transact(operation,null);
+        }
         if(binder==null || !binder.pingBinder()) throw new IOException("Shizuku остановлен. Запустите его снова");
         try(ParcelFileDescriptor fd=ParcelFileDescriptor.open(archive,write?
             ParcelFileDescriptor.MODE_CREATE|ParcelFileDescriptor.MODE_TRUNCATE|ParcelFileDescriptor.MODE_WRITE_ONLY:ParcelFileDescriptor.MODE_READ_ONLY)) {
-            Parcel data=Parcel.obtain(),reply=Parcel.obtain();
+            return transact(operation,fd);
+        }
+    }
+    private JSONObject transact(int operation,ParcelFileDescriptor fd) throws Exception {
+        if(binder==null || !binder.pingBinder()) throw new IOException("Shizuku остановлен. Запустите его снова");
+        Parcel data=Parcel.obtain(),reply=Parcel.obtain();
             try {
-                data.writeInterfaceToken(SaveAccessService.DESCRIPTOR); fd.writeToParcel(data,0);
+                data.writeInterfaceToken(SaveAccessService.DESCRIPTOR); if(fd!=null) fd.writeToParcel(data,0);
                 if(!binder.transact(operation,data,reply,0)) throw new IOException("Служба не поддерживает запрос");
                 reply.readException(); boolean success=reply.readInt()==1; String result=reply.readString();
                 if(!success) throw new IOException(result);
                 return new JSONObject(result);
             } finally { data.recycle(); reply.recycle(); }
-        }
     }
-    public void close() { try { Shizuku.unbindUserService(args,connection,true); } catch(RuntimeException ignored) {} }
+    public void close() {
+        if(!locked) return;
+        // Detach this client without asynchronously killing the service while the next
+        // check is binding. daemon(false) still ties its lifetime to the client process.
+        try { Shizuku.unbindUserService(args,connection,false); }
+        catch(RuntimeException ignored) {}
+        finally { locked=false; SERVICE_LOCK.release(); }
+    }
 }

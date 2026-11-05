@@ -99,9 +99,7 @@ final class SaveManager {
     }
     void checkRemoval(ApkPatcher.Progress progress) throws Exception {
         PatchEngine engine=new PatchEngine(context); JSONObject plan=engine.plan(); PackageInfo game=engine.installed();
-        if(game==null || plan==null || !plan.getBoolean("full") || !PatchEngine.GAME_VERSION.equals(game.versionName)
-            || game.getLongVersionCode()!=plan.getLong("versionCode") || PatchEngine.certificate(game).equals(plan.getString("cert")))
-            throw new IOException("Удаление для этой установки не требуется");
+        String blocked=engine.removalBlocker(plan); if(blocked!=null) throw new IOException(blocked);
         JSONObject record=verify();
         if(!record.getString("sourceCert").equals(PatchEngine.certificate(game)) || record.getInt("sourceUid")!=game.applicationInfo.uid)
             throw new IOException("Копия относится к другой установке игры. Создайте новую");
@@ -127,7 +125,8 @@ final class SaveManager {
             throw new IOException("Восстановление не подтверждено. Резервная копия сохранена");
         record.put("restoredCert",PatchEngine.certificate(game)).put("restoredAt",System.currentTimeMillis());
         save(record);
-        context.getSharedPreferences("status",0).edit().remove("restoreRequired").apply();
+        if(!context.getSharedPreferences("status",0).edit().remove("restoreRequired").commit())
+            throw new IOException("Миры записаны, но не удалось сохранить результат восстановления. Резервная копия сохранена");
         return report;
     }
 }

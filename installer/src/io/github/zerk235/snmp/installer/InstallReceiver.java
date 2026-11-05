@@ -18,11 +18,16 @@ public final class InstallReceiver extends BroadcastReceiver {
             }
         } else if (status == PackageInstaller.STATUS_SUCCESS) {
             context.getSharedPreferences("status", 0).edit().remove("session").apply();
-            try {
+            final PendingResult pendingResult=goAsync();
+            new Thread(()->{ try {
+                PatchEngine engine=new PatchEngine(context); engine.verifyInstalled(engine.plan());
+                Diagnostics.event(context,"installed_game_verified","current profile, version, certificate and native SHA256 verified");
                 PatchService.status(context,new SaveManager(context).needsRestore()
                     ? "Мод установлен. Теперь нажмите «Восстановить миры», прежде чем открывать игру."
                     : "Мод установлен. Можно запускать игру и подключаться в одной Wi-Fi сети.");
-            } catch(Exception error) { PatchService.status(context,"Мод установлен. Проверьте резервную копию миров перед запуском: "+error.getMessage()); }
+            } catch(Exception error) { PatchService.status(context,Diagnostics.failure(context,"verify-installed-game",error)); }
+              finally { pendingResult.finish(); }
+            },"snmp-verify-installed").start();
         } else {
             context.getSharedPreferences("status", 0).edit().remove("session").apply();
             String detail=result.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
