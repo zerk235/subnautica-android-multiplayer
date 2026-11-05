@@ -68,8 +68,63 @@ public final class SaveTests extends Instrumentation {
             boolean cloned=false;
             try { SaveAccessService.checkProfiles(" User 0: installed=true\n User 11: installed=true\n",0); } catch(IOException expected) { cloned=true; }
             check(cloned,"clone signature conflict not blocked");
+            SaveAccessService.checkProfiles(" User 0: installed=true stopped=false\n User 11: installed=false\n User 0:\n",0);
+            for(String dump:new String[]{"permission denied"," User 0: installed=false\n",
+                    " User 0: installed=true\n User 0: installed=false\n"," User 11: installed=true\n"}) {
+                boolean blocked=false;
+                try { SaveAccessService.checkProfiles(dump,0); } catch(IOException expected) { blocked=true; }
+                check(blocked,"unknown/absent/ambiguous current profile permitted deletion: "+dump);
+            }
+            GameProfiles recovery=new GameProfiles(" User 0: installed=false\n User 11: installed=true\n");
+            recovery.requireRecovery(0);
+            check(!recovery.json(0).getBoolean("currentInstalled") && recovery.installed.contains(11),"retained clone recovery state");
+            boolean already=false;
+            try { new GameProfiles(" User 0: installed=true\n").requireRecovery(0); } catch(IOException expected) { already=true; }
+            check(already,"recovery must refuse an installed current profile");
+            android.content.pm.PackageInfo fake=new android.content.pm.PackageInfo();
+            fake.applicationInfo=new android.content.pm.ApplicationInfo(); fake.applicationInfo.uid=10430;
+            check(!PatchEngine.installedHere(fake,0),"retained package treated as installed");
+            fake.applicationInfo.flags=android.content.pm.ApplicationInfo.FLAG_INSTALLED;
+            check(PatchEngine.installedHere(fake,0) && !PatchEngine.installedHere(fake,11),"cross-profile UID accepted");
             String mode=options==null?"core":options.getString("mode","core");
-            if("shizuku".equals(mode)) {
+            if("profile-readonly".equals(mode)) {
+                PatchEngine engine=new PatchEngine(context);
+                android.content.pm.PackageInfo installed=engine.installed();
+                check(installed!=null,"current game unavailable");
+                JSONObject testPlan=new JSONObject().put("cert",PatchEngine.certificate(installed)).put("versionCode",installed.getLongVersionCode());
+                engine.verifyInstalled(testPlan);
+                testPlan.put("cert","wrong");
+                boolean mismatch=false;
+                try { engine.verifyInstalled(testPlan); } catch(IOException expected) { mismatch=true; }
+                check(mismatch,"installation success accepted a wrong signer");
+                boolean hasClone;
+                try(SaveBridge bridge=new SaveBridge(context)) {
+                    JSONObject state=bridge.call(SaveAccessService.PROFILE_STATE,null,false);
+                    check(state.getBoolean("currentInstalled"),"remote current installation missing");
+                    result.putString("profiles",state.toString());
+                    hasClone=state.getJSONArray("installedUsers").length()>1;
+                    boolean blocked=false;
+                    try { bridge.call(SaveAccessService.RECOVER_GAME,null,false); }
+                    catch(IOException expected) { blocked=expected.getMessage().contains("уже установлена"); }
+                    check(blocked,"recovery did not refuse current installed game before any command");
+                }
+                if(hasClone && !PatchEngine.certificate(installed).equals(new LocalSigner().fingerprint())) {
+                    File preparedPlan=new File(engine.prepared,"plan.json");
+                    String beforePlan=preparedPlan.isFile()?ApkPatcher.sha256(preparedPlan):"absent";
+                    boolean blocked=false;
+                    try { engine.prepare((stage,done,total)->{}); }
+                    catch(IOException expected) { blocked=expected.getMessage().contains("профиле Android"); result.putString("preparationRefusal",expected.getMessage()); }
+                    check(blocked,"clone conflict was not refused before APK preparation");
+                    check(beforePlan.equals(preparedPlan.isFile()?ApkPatcher.sha256(preparedPlan):"absent"),"clone check replaced prepared files");
+                    result.putString("preparationGuard","PASS: clone + different signing key refused before modifying prepared package");
+                }
+                for(int i=0;i<5;i++) try(SaveBridge bridge=new SaveBridge(context)) {
+                    check(bridge.call(SaveAccessService.PROFILE_STATE,null,false).getBoolean("currentInstalled"),"consecutive Shizuku bind failed");
+                }
+                result.putString("repeatBridge","PASS: five immediate close/rebind cycles");
+                result.putString("gameCertificate",PatchEngine.certificate(installed));
+                result.putString("localCertificate",new LocalSigner().fingerprint());
+            } else if("shizuku".equals(mode)) {
                 JSONObject backup=new SaveManager(context).backup(); new SaveManager(context).verify();
                 try(SaveBridge bridge=new SaveBridge(context)) {
                     JSONObject checked=bridge.call(SaveAccessService.CHECK,new SaveManager(context).archive(backup),false);
