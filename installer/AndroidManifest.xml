@@ -1,20 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.github.zerk235.snmp.installer" android:versionCode="3" android:versionName="0.3.0-preview">
+    package="io.github.zerk235.snmp.installer" android:versionCode="4" android:versionName="0.3.1-preview">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="29" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <queries><package android:name="com.unknownworlds.subnautica" /><package android:name="moe.shizuku.privileged.api" /></queries>
-    <application android:label="SN Multiplayer Installer" android:theme="@android:style/Theme.Material.NoActionBar"
+    <application android:name=".InstallerApplication" android:label="SN Multiplayer Installer" android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false" android:supportsRtl="true" android:usesCleartextTraffic="false">
         <meta-data android:name="moe.shizuku.client.V3_SUPPORT" android:value="true" />
         <provider android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="io.github.zerk235.snmp.installer.shizuku"
             android:multiprocess="false" android:enabled="true" android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <provider android:name=".ReportProvider" android:authorities="io.github.zerk235.snmp.installer.reports"
+            android:exported="false" android:grantUriPermissions="true" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

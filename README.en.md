@@ -8,12 +8,19 @@ This is a public preview demo. The Android installer passed a clean game install
 
 ## Download and install
 
-**[Download installer 0.3 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.0-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.0-installer-preview)
+**[Download installer 0.3.1 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.1-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.1-installer-preview)
+
+**0.3.1 adds diagnostics:** stable error codes, explanations and next steps, persisted
+exception details, and a shareable ZIP with installation information and game logs
+through authorized Shizuku. For sync issues, collect reports on both phones and name
+the host. Missing logs are explicitly reported. [Report guide (Russian)](docs/DIAGNOSTICS.md).
+If your game already has the 0.3.0 mod, update **only the installer over the existing
+app**. Repatching the game is unnecessary: the native mod and protocol 25 are unchanged.
 
 **November 5 update:** the installer now has **“Запустить хостом” (Launch as host)**
 and **“Подключиться гостем” (Join as guest)**. A non-root phone can host a previously
 downloaded world. Autoload after switching roles retains the former host's original save.
-Update SN Multiplayer Installer over the existing app,
+When upgrading from 0.2, update SN Multiplayer Installer over the existing app,
 save your game and return to its main menu, then run **Prepare mod → Install
 prepared mod** on both phones. Keep the installer's data: it holds your update key.
 Both players must update the mod: protocol **25** is incompatible with the previous

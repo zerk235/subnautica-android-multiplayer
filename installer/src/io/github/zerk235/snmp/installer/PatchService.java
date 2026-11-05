@@ -17,10 +17,11 @@ public final class PatchService extends Service {
 
     static void status(Context context, String message) {
         context.getSharedPreferences("status", 0).edit().putString("message", message).apply();
+        Diagnostics.progress(context,message);
     }
 
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (pendingSession(this) >= 0) {
+        if (pendingSession(this) >= 0 && (intent==null || !"diagnostics".equals(intent.getAction()))) {
             status(this, "Есть незавершённая установка Android. Подтвердите или отмените её в установщике.");
             if (!BUSY.get()) stopSelf();
             return START_NOT_STICKY;
@@ -29,6 +30,7 @@ public final class PatchService extends Service {
         getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel(CHANNEL, "Подготовка мода", NotificationManager.IMPORTANCE_LOW));
         startForeground(1, notification("Подготовка…"));
         final String action=intent==null?"prepare":intent.getAction();
+        Diagnostics.begin(this,action);
         new Thread(() -> {
             PowerManager.WakeLock wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SNMP:prepare");
             try {
@@ -42,7 +44,11 @@ public final class PatchService extends Service {
                     status(this, text);
                     getSystemService(NotificationManager.class).notify(1, notification(text));
                 };
-                if ("install".equals(action)) install(engine, progress);
+                if("diagnostics".equals(action)) {
+                    status(this,"Сбор диагностики. Игра продолжает работать…");
+                    File report=Diagnostics.create(this,intent.getStringExtra("category"),intent.getStringExtra("description"),true);
+                    status(this,"Диагностический ZIP готов. Нажмите «Отправить ZIP» или «Сохранить диагностический ZIP». Получите такой же отчёт со второго телефона при проблеме синхронизации.");
+                } else if ("install".equals(action)) install(engine, progress);
                 else if("backup".equals(action)) {
                     status(this,"Копирование миров и проверка SHA256…");
                     JSONObject record=new SaveManager(this).backup();
@@ -68,8 +74,9 @@ public final class PatchService extends Service {
                 }
             } catch (Throwable e) {
                 android.util.Log.e("SNMPInstaller", "Operation failed", e);
-                status(this, "Не удалось завершить: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                status(this, Diagnostics.failure(this,action,e));
             } finally {
+                Diagnostics.finish(this,action);
                 if (wake.isHeld()) wake.release();
                 BUSY.set(false); stopForeground(true); stopSelf();
             }

@@ -8,7 +8,7 @@ import java.io.*;
 /** Shizuku UserService. Only this installer's UID and fixed game paths are allowed. */
 public final class SaveAccessService extends Binder {
     static final String DESCRIPTOR="io.github.zerk235.snmp.installer.SaveAccess.v1";
-    static final int SNAPSHOT=1, CHECK=2, RESTORE=3, CHECK_REMOVAL=4, CHECK_PROFILES=5;
+    static final int SNAPSHOT=1, CHECK=2, RESTORE=3, CHECK_REMOVAL=4, CHECK_PROFILES=5, DIAGNOSTICS=6;
     final int owner;
     final File saves;
     public SaveAccessService(Context context) {
@@ -24,7 +24,12 @@ public final class SaveAccessService extends Binder {
         data.enforceInterface(DESCRIPTOR);
         try {
             JSONObject result;
-            if(code==SNAPSHOT) {
+            if(code==DIAGNOSTICS) {
+                // Read-only: no force-stop, save access or arbitrary caller-provided path/command.
+                try(ParcelFileDescriptor fd=ParcelFileDescriptor.CREATOR.createFromParcel(data)) {
+                    result=DiagnosticLogs.capture(saves.getParentFile(),new ParcelFileDescriptor.AutoCloseOutputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),true,owner/100000);
+                }
+            } else if(code==SNAPSHOT) {
                 try(ParcelFileDescriptor fd=ParcelFileDescriptor.CREATOR.createFromParcel(data)) {
                     JSONObject manifest=SaveArchive.create(saves,new ParcelFileDescriptor.AutoCloseOutputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())));
                     result=new JSONObject().put("files",manifest.getJSONObject("files").length()).put("bytes",manifest.getLong("bytes"));

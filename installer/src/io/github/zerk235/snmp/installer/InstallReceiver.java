@@ -9,11 +9,12 @@ public final class InstallReceiver extends BroadcastReceiver {
         int pending = context.getSharedPreferences("status", 0).getInt("session", -1);
         if (id != pending || pending < 0) return;
         int status = result.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+        Diagnostics.event(context,"android_install_result","session="+id+" status="+status+" message="+result.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE));
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
             Intent confirm = result.getParcelableExtra(Intent.EXTRA_INTENT);
             if (confirm != null) {
                 try { context.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
-                catch (Exception e) { PatchService.status(context, "Android не открыл подтверждение. Вернитесь в установщик и повторите установку."); }
+                catch (Exception e) { PatchService.status(context, Diagnostics.failure(context,"android-confirmation",e)); }
             }
         } else if (status == PackageInstaller.STATUS_SUCCESS) {
             context.getSharedPreferences("status", 0).edit().remove("session").apply();
@@ -24,8 +25,10 @@ public final class InstallReceiver extends BroadcastReceiver {
             } catch(Exception error) { PatchService.status(context,"Мод установлен. Проверьте резервную копию миров перед запуском: "+error.getMessage()); }
         } else {
             context.getSharedPreferences("status", 0).edit().remove("session").apply();
-            PatchService.status(context, "Установка не завершена (" + status + "): " + result.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-                + "\nИгра автоматически не удаляется. Подготовленные файлы сохранены.");
+            String detail=result.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+            PatchService.status(context,Diagnostics.failure(context,"android-install",DiagnosticError.installation(status,detail),
+                new java.io.IOException("PackageInstaller status="+status+" session="+id+": "+detail))
+                +"\nПодготовленные файлы сохранены.");
         }
     }
 }

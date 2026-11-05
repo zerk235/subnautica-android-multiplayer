@@ -24,7 +24,7 @@ final class SaveBridge implements AutoCloseable {
         String blocked=readiness(); if(blocked!=null) throw new IOException(blocked);
         CountDownLatch ready=new CountDownLatch(1);
         args=new Shizuku.UserServiceArgs(new ComponentName(context,SaveAccessService.class))
-            .tag("snmp-save-backup-v1").version(2).daemon(false).processNameSuffix("save_access");
+            .tag("snmp-save-backup-v1").version(3).daemon(false).processNameSuffix("save_access");
         connection=new ServiceConnection() {
             public void onServiceConnected(ComponentName name,IBinder service) { binder=service; ready.countDown(); }
             public void onServiceDisconnected(ComponentName name) { binder=null; }
