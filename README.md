@@ -6,6 +6,10 @@
 
 > Предварительное публичное демо. Это не завершённый мультиплеер: часть объектов и действий ещё не синхронизируется. Установщик 0.3 добавляет выбор хоста и гостя; проверенные копии миров и восстановление через Shizuku сохранены. Для тестов используйте отдельный мир и сохраняйте резервные копии отдельно.
 
+## 🎮 Multiplayer Gameplay
+
+![Subnautica Android Multiplayer](assets/subnautica_multiplayer_preview.gif)
+
 ## Скачать и установить
 
 **[Скачать установщик 0.3 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.0-installer-preview/snmp-installer-preview.apk)** · [Страница релиза и контрольная сумма](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.0-installer-preview)
