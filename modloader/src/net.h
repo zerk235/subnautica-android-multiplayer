@@ -22,9 +22,9 @@ constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 25;  // first base identity + two-hand held world pose
+constexpr uint16_t kSessionProtocolVersion = 27;  // explicit interior parent and local pose
 #else
-constexpr uint16_t kSessionProtocolVersion = 8;  // complete saved cell handoff + held world pose
+constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
 #endif
 constexpr size_t kMaxSessionCandidates = kMaxPeers;
 
@@ -323,6 +323,7 @@ constexpr uint8_t kWorldBuildForceUpright = 0x04;
 constexpr uint8_t kWorldBuildRotatable = 0x08;
 constexpr uint8_t kWorldBuildAttached = 0x10;
 constexpr uint8_t kWorldBuildAnchored = 0x20;
+constexpr uint8_t kWorldBuildInterior = 0x80; // completed Locker in an exact shared Base
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 constexpr uint8_t kWorldBuildHasGeometry = 0x40;
 #endif
@@ -375,6 +376,8 @@ struct WorldEvent {
     uint32_t geometry_hash_low;
     uint32_t geometry_hash_high;
 #endif
+    uint8_t interior_parent_guid[16];
+    float interior_local_pose[7]; // ModulesRoot position xyz and quaternion xyzw
 };
 
 // Queues an event for every peer. Call from the game thread. The event is repeated until it is

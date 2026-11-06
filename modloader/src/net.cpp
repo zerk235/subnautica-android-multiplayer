@@ -64,6 +64,7 @@ enum PacketType : uint8_t {
     kPacketJoinRequest = 14,
     kPacketJoinReply = 15,
     kPacketSessionLeave = 16,
+    kPacketWorldEventStatus = 19,
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
     kPacketGeometryFragment = 17,
     kPacketGeometryAck = 18,
@@ -229,6 +230,13 @@ struct WorldCompletePacket {
 // forwards a guest's pickup it keeps the guest's id and sequence, so the other guests recognise
 // the copy as the same event instead of treating it as new. One fixed size serves every kind:
 // pickup/drop leave the build tail zeroed, build events leave the throw velocity zeroed.
+struct EventStreamStamp {
+    uint8_t session_id[16];
+    uint32_t epoch;
+    uint32_t stream_id;
+    uint32_t first_sequence;
+};
+
 struct WorldEventPacket {
     PacketHeader header;
     uint32_t id;
@@ -263,6 +271,9 @@ struct WorldEventPacket {
     uint32_t geometry_hash_low;
     uint32_t geometry_hash_high;
 #endif
+    uint8_t interior_parent_guid[16];
+    float interior_local_pose[7];
+    EventStreamStamp stream;
 };
 
 // Cumulative rather than per-event: a guest that acks sequence 40 has implicitly received
@@ -272,6 +283,17 @@ struct WorldEventAckPacket {
     uint32_t id;
     uint32_t origin_id;
     uint32_t sequence;
+    EventStreamStamp stream;
+};
+
+// Also sent when idle: the receiver can detect missing history without waiting for
+// another build. This never authorizes skipping a missing action.
+struct WorldEventStatusPacket {
+    PacketHeader header;
+    uint32_t id;
+    EventStreamStamp stream;
+    uint32_t latest_sequence;
+    uint32_t oldest_sequence;
 };
 
 // The host's DayNightCycle clock (timePassedAsDouble) plus the rate it is actually advancing
@@ -360,17 +382,19 @@ static_assert(sizeof(WorldChunkPacket) == 1048, "chunk");
 static_assert(sizeof(WorldAckPacket) == 20, "world ack");
 static_assert(sizeof(WorldCompletePacket) == 16, "complete");
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-static_assert(sizeof(WorldEventPacket) == 280, "event with geometry fingerprint");
-static_assert(sizeof(WorldEvent) == 268, "event game-side carrier with geometry fingerprint");
+static_assert(sizeof(WorldEventPacket) == 352, "event with interior pose, geometry fingerprint and stream");
+static_assert(sizeof(WorldEvent) == 312, "event game-side carrier with interior pose");
 static_assert(offsetof(WorldEventPacket, geometry_hash_low) == 272 &&
               offsetof(WorldEvent, geometry_hash_low) == 260, "geometry fingerprint wire offset");
 #else
-static_assert(sizeof(WorldEventPacket) == 272, "event");
+static_assert(sizeof(WorldEventPacket) == 344, "event");
 // header (8) + id (4) on top of the game-side carrier
-static_assert(sizeof(WorldEvent) == 260, "event game-side carrier");
+static_assert(sizeof(WorldEvent) == 304, "event game-side carrier");
 #endif
-static_assert(sizeof(WorldEventPacket) == sizeof(WorldEvent) + 12, "event wire mirror");
-static_assert(sizeof(WorldEventAckPacket) == 20, "event ack");
+static_assert(sizeof(EventStreamStamp) == 28, "event session and initial delivery boundary");
+static_assert(sizeof(WorldEventPacket) == sizeof(WorldEvent) + 40, "event wire mirror");
+static_assert(sizeof(WorldEventAckPacket) == 48, "event ack");
+static_assert(sizeof(WorldEventStatusPacket) == 48, "event stream status");
 static_assert(sizeof(TimePacket) == 24, "time");
 static_assert(sizeof(SessionPresencePacket) == 165, "session presence");
 static_assert(sizeof(JoinRequestPacket) == 48, "join request");
@@ -557,16 +581,15 @@ char g_handoff_detail[128] = {0};
 // ---------------------------------------------------------------------------
 // Reliable world events
 //
-// The ring below is the retry queue. Every slot is one event that has been sent but not yet
-// acknowledged, so the pump can walk it and repeat whatever is due. A ring rather than a list
-// because the alternative - a heap with per-peer ownership - buys nothing here: an event only
-// leaves the queue once every peer has it, and that is a single condition on the whole slot.
+// The ring retains recent commands even while discovery has no eligible peers.
+// Per-process watermarks select each recipient's ordered retry window.
 // ---------------------------------------------------------------------------
 
-constexpr int kEventRingSize = 128;     // power of two, so the mask does the modulo
+constexpr int kEventRingSize = 1024;    // bounded history, including across peer timeouts
 constexpr int kEventRingMask = kEventRingSize - 1;
 constexpr double kEventResendInterval = 0.25;
-constexpr double kEventExpiry = 5.0;
+constexpr int kEventSendWindow = 8;     // must fit in the receive reorder window
+constexpr int kEventRecipientSlots = 64;
 
 // Log names for the event kinds; anything unknown stays honest in the log instead of
 // masquerading as a pickup.
@@ -591,45 +614,12 @@ bool event_kind_known(uint8_t kind) {
 
 struct EventSlot {
     bool used;
-    bool local_only;   // produced here and already applied; never needs to be echoed back to us
-    uint32_t origin_id;
-    uint32_t sequence;
-    uint8_t kind;
-    uint8_t build_flags;
-    uint8_t guid[16];
-    uint8_t class_id[16];
-    int32_t tech_type;
-    float constructed_amount;
-    float x, y, z;
-    float qx, qy, qz, qw;
-    float vx, vy, vz;
-    char object_id[kWorldEventObjectIdSize];
-    int32_t proto_version;
-    int32_t face_linked_module_type;
-    float face_linked_position[3];
-    int32_t face_cell[3];
-    uint32_t face_direction;
-    uint8_t face_has_value;
-    uint8_t reserved8[3];
-#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-    uint32_t geometry_hash_low;
-    uint32_t geometry_hash_high;
-#endif
-    // One bit per peer slot. Cleared when the peer times out, because a peer that left will
-    // never acknowledge and would otherwise pin the event in the queue forever.
-    uint32_t acked;
-    double last_send;
-    double created;
+    WorldEvent event;
 };
 
 // One ring for the local origin, plus one delivery window per remote origin.
-
-// One ring for the local origin, plus one delivery window per remote origin.
-// The window has to be per origin rather than a single counter: the host numbers its own
-// events from its own counter while forwarding guests' events with their numbers intact, so a
-// shared counter would let a high host sequence hide a lower guest sequence still in flight and
-// silently drop it as a duplicate.
-constexpr int kEventOriginSlots = kMaxPeers + 1;
+// Preserve receive prefixes across discovery timeouts and process/slot turnover.
+constexpr int kEventOriginSlots = kEventRecipientSlots;
 // Out-of-order hold: pickup/drop are commands, not pose, so "2 before 1" must NOT advance
 // past 1 - the old highest-seen watermark acked events it had only heard of, and an event
 // overtaken by a later one was lost forever once its retransmits were answered as duplicates.
@@ -641,23 +631,44 @@ struct EventOrigin {
     // Contiguous-delivery window: next_sequence is the lowest sequence not yet handed to the
     // game inbox. The ack only ever covers what actually reached the inbox, so a gap stalls
     // the watermark and the sender retransmits into it - which is what a cumulative ack
-    // must do over UDP. seq_valid arms the window on the first event from this origin.
+    // must do over UDP. The sender's explicit first_sequence arms a new origin.
     bool seq_valid;
     uint32_t next_sequence;
+    uint32_t stream_id;
+    uint32_t first_sequence;
+    bool history_lost;
     bool pending_used[kEventPendingSize];
     WorldEvent pending[kEventPendingSize];
+};
+
+// Keyed by process identity, never by the recyclable discovery slot. A timeout or
+// changed IP retains this watermark; a genuinely new process gets a new baseline.
+struct EventRecipient {
+    bool used;
+    uint32_t id;
+    uint32_t first_sequence;
+    uint32_t acknowledged;
+    uint32_t sent_through;
+    bool history_lost;
+    double last_send;
+    double last_status;
+    double last_report;
 };
 
 struct EventRing {
     uint32_t next_sequence;
     EventSlot slots[kEventRingSize];
     EventOrigin origins[kEventOriginSlots];
-    uint32_t peer_bits;
+    EventRecipient recipients[kEventRecipientSlots];
+    bool context_valid;
+    uint8_t session_id[16];
+    uint32_t epoch;
+    uint32_t stream_id;
 };
 
 pthread_mutex_t g_event_lock = PTHREAD_MUTEX_INITIALIZER;
 EventRing g_events;
-uint32_t g_event_peer_count = 0;
+uint32_t g_event_generation = 0;
 unsigned long long g_event_rx = 0;
 unsigned long long g_event_tx = 0;
 unsigned long long g_event_dup = 0;
@@ -711,6 +722,7 @@ void drain_pending(EventOrigin* origin) {
             if (!inbox_push(origin->pending[i])) return;
             origin->pending_used[i] = false;
             origin->next_sequence++;
+            ++g_event_rx;
             progressed = true;
         }
     }
@@ -1943,398 +1955,7 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
 // Reliable world events: send
 // ---------------------------------------------------------------------------
 
-// The peer's slot index doubles as its bit in EventSlot::acked. Peers are recycled rather than
-// compacted, so an index that comes back means a different phone and any bit set for it has to
-// be cleared - otherwise a new peer inherits acknowledgements it never sent.
-uint32_t event_peer_bit(uint32_t peer_id) {
-    pthread_once(&g_peers_lock_once, init_peers_lock);
-    pthread_mutex_lock(&g_peers_lock);
-    uint32_t bit = 0;
-    for (size_t i = 0; i < kMaxPeers; i++) {
-        if (g_peers[i].active && g_peers[i].id == peer_id &&
-            session_peer_eligible_locked(i, true)) {
-            bit = 1u << i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_peers_lock);
-    return bit;
-}
-
-// Everyone currently online, as a bitmask. Read under the event lock so it is consistent with
-// the acked bits it is compared against.
-uint32_t active_peer_mask() {
-    pthread_once(&g_peers_lock_once, init_peers_lock);
-    pthread_mutex_lock(&g_peers_lock);
-    uint32_t mask = 0;
-    for (size_t i = 0; i < kMaxPeers; i++) {
-        if (!g_peers[i].active) continue;
-        if (g_peers[i].last_seen + kPeerTimeout <= monotonic_seconds()) continue;
-        if (!session_peer_eligible_locked(i, true)) continue;
-        mask |= 1u << i;
-    }
-    pthread_mutex_unlock(&g_peers_lock);
-    return mask;
-}
-
-void send_world_event(const EventSlot& slot, const struct sockaddr_in& addr) {
-    WorldEventPacket packet{};
-    packet.header.magic = kMagic;
-    packet.header.type = kPacketWorldEvent;
-    // id is this phone, because it is the one sending. origin_id stays the player whose action
-    // caused it, which is what lets the host relay without rewriting the identity.
-    packet.id = g_local_id;
-    packet.origin_id = slot.origin_id;
-    packet.sequence = slot.sequence;
-    packet.kind = slot.kind;
-    packet.build_flags = slot.build_flags;
-    memcpy(packet.guid, slot.guid, sizeof(packet.guid));
-    memcpy(packet.class_id, slot.class_id, sizeof(packet.class_id));
-    packet.tech_type = slot.tech_type;
-    packet.constructed_amount = slot.constructed_amount;
-    packet.x = slot.x;
-    packet.y = slot.y;
-    packet.z = slot.z;
-    packet.qx = slot.qx;
-    packet.qy = slot.qy;
-    packet.qz = slot.qz;
-    packet.qw = slot.qw;
-    packet.vx = slot.vx;
-    packet.vy = slot.vy;
-    packet.vz = slot.vz;
-    memcpy(packet.object_id, slot.object_id, sizeof(packet.object_id));
-    packet.proto_version = slot.proto_version;
-    packet.face_linked_module_type = slot.face_linked_module_type;
-    memcpy(packet.face_linked_position, slot.face_linked_position,
-           sizeof(packet.face_linked_position));
-    memcpy(packet.face_cell, slot.face_cell, sizeof(packet.face_cell));
-    packet.face_direction = slot.face_direction;
-    packet.face_has_value = slot.face_has_value;
-#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-    packet.geometry_hash_low = slot.geometry_hash_low;
-    packet.geometry_hash_high = slot.geometry_hash_high;
-#endif
-    send_to(&packet, sizeof(packet), addr);
-    g_event_tx++;
-}
-
-// Hands one event to every peer. Callers hold g_event_lock.
-void broadcast_world_event(const EventSlot& slot) {
-    pthread_once(&g_peers_lock_once, init_peers_lock);
-    pthread_mutex_lock(&g_peers_lock);
-    double now = monotonic_seconds();
-    for (size_t i = 0; i < kMaxPeers; i++) {
-        if (!g_peers[i].active) continue;
-        if (now - g_peers[i].last_seen > kPeerTimeout) continue;
-        if (!session_peer_eligible_locked(i, true)) continue;
-        if (slot.origin_id == g_peers[i].id) continue;   // it already has this one
-        send_world_event(slot, g_peers[i].raw);
-    }
-    pthread_mutex_unlock(&g_peers_lock);
-}
-
-// Called from the game thread. Returns false only when the queue is full, which is reported
-// rather than silently dropping the event: a player who picks something up and watches it stay
-// on the floor deserves a log line.
-bool queue_local_event(const WorldEvent& event, bool already_applied) {
-    // Taken before the event lock, for the same reason service_world_events takes it there: the
-    // peer lock is never held while the event lock is held.
-    uint32_t live = active_peer_mask();
-
-    pthread_mutex_lock(&g_event_lock);
-
-    EventSlot& slot = g_events.slots[g_events.next_sequence & kEventRingMask];
-    if (slot.used) {
-        // The ring wrapped onto an event that never got acknowledged. Overwriting is the right
-        // call: the alternative is refusing all further events until the peer comes back.
-        LOG_WARN("event: retry queue full, dropping unacked %s %u from %08x",
-                 event_kind_name(slot.kind), slot.sequence, slot.origin_id);
-        g_events.slots[g_events.next_sequence & kEventRingMask].used = false;
-    }
-
-    memset(&slot, 0, sizeof(slot));
-    slot.used = true;
-    slot.local_only = already_applied;
-    slot.origin_id = g_local_id;
-    slot.sequence = ++g_events.next_sequence;
-    slot.kind = event.kind;
-    slot.build_flags = event.build_flags;
-    memcpy(slot.guid, event.guid, sizeof(slot.guid));
-    memcpy(slot.class_id, event.class_id, sizeof(slot.class_id));
-    slot.tech_type = event.tech_type;
-    slot.constructed_amount = event.constructed_amount;
-    memcpy(slot.object_id, event.object_id, sizeof(slot.object_id));
-    slot.proto_version = event.proto_version;
-    slot.face_linked_module_type = event.face_linked_module_type;
-    memcpy(slot.face_linked_position, event.face_linked_position,
-           sizeof(slot.face_linked_position));
-    memcpy(slot.face_cell, event.face_cell, sizeof(slot.face_cell));
-    slot.face_direction = event.face_direction;
-    slot.face_has_value = event.face_has_value;
-#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-    slot.geometry_hash_low = event.geometry_hash_low;
-    slot.geometry_hash_high = event.geometry_hash_high;
-#endif
-    slot.x = event.x;
-    slot.y = event.y;
-    slot.z = event.z;
-    slot.qx = event.qx;
-    slot.qy = event.qy;
-    slot.qz = event.qz;
-    slot.qw = event.qw;
-    slot.vx = event.vx;
-    slot.vy = event.vy;
-    slot.vz = event.vz;
-    // Nothing is pre-acknowledged, and this is the whole reason the event is reliable. already_applied
-    // means the local game has already made the change, not that the peers have seen it; starting
-    // from active_peer_mask() marked every live peer as having the event before it was ever sent,
-    // so the first service pass saw outstanding == 0 and retired the slot with no retransmit.
-    slot.acked = 0;
-    slot.created = monotonic_seconds();
-    slot.last_send = 0.0;
-
-    EventSlot copy = slot;
-    pthread_mutex_unlock(&g_event_lock);
-
-    broadcast_world_event(copy);
-    return true;
-}
-
-// Retransmit loop, on the pump thread. Anything unacknowledged goes out again, and a slot whose
-// peers have all gone is released so the ring keeps moving.
-void service_world_events(double now) {
-    // Taken before the event lock and never while holding it: the peer lock and the event lock
-    // are never nested, because the peer lock is what serialises the pose path.
-    uint32_t live = active_peer_mask();
-
-    pthread_mutex_lock(&g_event_lock);
-    for (int i = 0; i < kEventRingSize; i++) {
-        EventSlot& slot = g_events.slots[i];
-        if (!slot.used) continue;
-
-        uint32_t outstanding = live & ~slot.acked;
-        if (outstanding == 0) {
-            slot.used = false;
-            continue;
-        }
-        if (now - slot.created > kEventExpiry) {
-            LOG_WARN("event: %s %u from %08x expired unacked", event_kind_name(slot.kind),
-                     slot.sequence, slot.origin_id);
-            slot.used = false;
-            continue;
-        }
-        if (now - slot.last_send < kEventResendInterval) continue;
-
-        EventSlot copy = slot;
-        pthread_mutex_unlock(&g_event_lock);
-        broadcast_world_event(copy);
-        pthread_mutex_lock(&g_event_lock);
-
-        // The slot may have been reused while the lock was dropped, so re-find it by sequence.
-        for (int j = 0; j < kEventRingSize; j++) {
-            if (g_events.slots[j].used && g_events.slots[j].sequence == copy.sequence &&
-                g_events.slots[j].origin_id == copy.origin_id) {
-                g_events.slots[j].last_send = now;
-                break;
-            }
-        }
-    }
-
-    // A peer that dropped has to stop counting against every queued event.
-    if (live != g_events.peer_bits) {
-        for (int i = 0; i < kEventRingSize; i++) {
-            if (g_events.slots[i].used) g_events.slots[i].acked &= live;
-        }
-        g_events.peer_bits = live;
-    }
-
-    pthread_mutex_unlock(&g_event_lock);
-}
-
-// ---------------------------------------------------------------------------
-// Reliable world events: receive
-// ---------------------------------------------------------------------------
-
-void handle_event_packet(const uint8_t* data, size_t size, const struct sockaddr_in& addr) {
-    if (size < sizeof(PacketHeader)) return;
-
-    PacketHeader header{};
-    memcpy(&header, data, sizeof(header));
-
-    uint32_t sender_id = 0;
-    if (header.type == kPacketWorldEventAck && size >= sizeof(WorldEventAckPacket)) {
-        WorldEventAckPacket packet{};
-        memcpy(&packet, data, sizeof(packet));
-        sender_id = packet.id;
-    } else if (header.type == kPacketWorldEvent && size >= sizeof(WorldEventPacket)) {
-        WorldEventPacket packet{};
-        memcpy(&packet, data, sizeof(packet));
-        sender_id = packet.id;
-    } else {
-        return;
-    }
-    pthread_once(&g_peers_lock_once, init_peers_lock);
-    pthread_mutex_lock(&g_peers_lock);
-    int sender_index = peer_index_by_id(sender_id);
-    bool allowed = sender_index >= 0 &&
-                   session_peer_eligible_locked(static_cast<size_t>(sender_index), true);
-    pthread_mutex_unlock(&g_peers_lock);
-    if (!allowed) return;
-
-    if (header.type == kPacketWorldEventAck) {
-        if (size < sizeof(WorldEventAckPacket)) return;
-        WorldEventAckPacket packet{};
-        memcpy(&packet, data, sizeof(packet));
-        if (packet.origin_id != g_local_id) return;
-
-        // Resolved before taking the event lock: event_peer_bit takes the peer lock, and the
-        // two locks must never be nested.
-        uint32_t bit = event_peer_bit(packet.id);
-        if (bit == 0) return;
-
-        pthread_mutex_lock(&g_event_lock);
-        for (int i = 0; i < kEventRingSize; i++) {
-            EventSlot& slot = g_events.slots[i];
-            // A cumulative ack covers every lower sequence, so the test is not equality.
-            if (slot.used && slot.origin_id == packet.origin_id &&
-                slot.sequence <= packet.sequence) {
-                slot.acked |= bit;
-            }
-        }
-        pthread_mutex_unlock(&g_event_lock);
-        return;
-    }
-
-    if (size < sizeof(WorldEventPacket)) return;
-    WorldEventPacket packet{};
-    memcpy(&packet, data, sizeof(packet));
-    if (packet.id == g_local_id) return;
-    if (!event_kind_known(packet.kind)) return;
-
-    WorldEvent event{};
-    event.origin_id = packet.origin_id;
-    event.sequence = packet.sequence;
-    event.kind = packet.kind;
-    event.build_flags = packet.build_flags;
-    memcpy(event.guid, packet.guid, sizeof(event.guid));
-    memcpy(event.class_id, packet.class_id, sizeof(event.class_id));
-    event.tech_type = packet.tech_type;
-    event.constructed_amount = packet.constructed_amount;
-    memcpy(event.object_id, packet.object_id, sizeof(event.object_id));
-    event.proto_version = packet.proto_version;
-    event.face_linked_module_type = packet.face_linked_module_type;
-    memcpy(event.face_linked_position, packet.face_linked_position,
-           sizeof(event.face_linked_position));
-    memcpy(event.face_cell, packet.face_cell, sizeof(event.face_cell));
-    event.face_direction = packet.face_direction;
-    event.face_has_value = packet.face_has_value;
-#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-    event.geometry_hash_low = packet.geometry_hash_low;
-    event.geometry_hash_high = packet.geometry_hash_high;
-#endif
-    event.x = packet.x;
-    event.y = packet.y;
-    event.z = packet.z;
-    event.qx = packet.qx;
-    event.qy = packet.qy;
-    event.qz = packet.qz;
-    event.qw = packet.qw;
-    event.vx = packet.vx;
-    event.vy = packet.vy;
-    event.vz = packet.vz;
-
-    pthread_mutex_lock(&g_event_lock);
-
-    EventOrigin* origin = nullptr;
-    for (int i = 0; i < kEventOriginSlots; i++) {
-        if (g_events.origins[i].used && g_events.origins[i].id == packet.origin_id) {
-            origin = &g_events.origins[i];
-            break;
-        }
-    }
-    if (!origin) {
-        for (int i = 0; i < kEventOriginSlots; i++) {
-            if (!g_events.origins[i].used) {
-                origin = &g_events.origins[i];
-                memset(origin, 0, sizeof(*origin));
-                origin->used = true;
-                origin->id = packet.origin_id;
-                break;
-            }
-        }
-    }
-
-    uint32_t ack_value = 0;
-    bool send_ack = false;
-
-    if (!origin) {
-        // No origin slot: drop without ack so the sender keeps retransmitting while it
-        // retries; when a slot frees up the event lands.
-    } else if (!origin->seq_valid) {
-        // First event from this origin arms the window at its own sequence. Anything the
-        // sender still holds below it either predates us or was already dropped by the
-        // sender's own expiry.
-        if (inbox_push(event)) {
-            origin->seq_valid = true;
-            origin->next_sequence = event.sequence + 1;
-            g_event_rx++;
-            LOG_INFO("event: %s %u from %08x",
-                     event_kind_name(event.kind), event.sequence,
-                     event.origin_id);
-            drain_pending(origin);
-            ack_value = origin->next_sequence - 1;
-            send_ack = true;
-        }
-        // else: inbox full - no ack, the sender retries after kEventResendInterval.
-    } else if ((int32_t)(event.sequence - origin->next_sequence) < 0 ||
-               origin_has_pending(origin, event.sequence)) {
-        // Below the delivered prefix, or already buffered above the gap: a retransmit of
-        // something handled. Counted, dropped quietly, ack repeats the delivered prefix.
-        g_event_dup++;
-        ack_value = origin->next_sequence - 1;
-        send_ack = true;
-    } else if (event.sequence == origin->next_sequence) {
-        // In order.
-        if (inbox_push(event)) {
-            origin->next_sequence = event.sequence + 1;
-            g_event_rx++;
-            LOG_INFO("event: %s %u from %08x",
-                     event_kind_name(event.kind), event.sequence,
-                     event.origin_id);
-            drain_pending(origin);
-        }
-        // The watermark moves only when the inbox accepted the event, so the ack never
-        // claims a byte the game has not received.
-        ack_value = origin->next_sequence - 1;
-        send_ack = true;
-    } else {
-        // Out of order: hold in the reorder window until the gap fills. A full window
-        // drops WITHOUT acking, so the sender retransmits the dropped one later instead
-        // of reading the watermark as "delivered".
-        if (!origin_store_pending(origin, event)) {
-            static double s_last_pending_drop = 0.0;
-            double now = monotonic_seconds();
-            if (now - s_last_pending_drop > 5.0) {
-                s_last_pending_drop = now;
-                LOG_WARN("event: reorder window full, dropping %s %u (will be retransmitted)",
-                         event_kind_name(event.kind), event.sequence);
-            }
-        }
-        ack_value = origin->next_sequence - 1;
-        send_ack = true;
-    }
-
-    pthread_mutex_unlock(&g_event_lock);
-
-    if (!send_ack) return;
-    WorldEventAckPacket ack{};
-    ack.header.magic = kMagic;
-    ack.header.type = kPacketWorldEventAck;
-    ack.id = g_local_id;
-    ack.origin_id = packet.origin_id;
-    ack.sequence = ack_value;
-    send_to(&ack, sizeof(ack), addr);
-}
+#include "world_event_transport.inc"
 
 void send_join_reply(const JoinReplyPacket& reply, const struct sockaddr_in& addr) {
     send_to(&reply, sizeof(reply), addr);
@@ -2784,9 +2405,9 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
         pthread_mutex_lock(&g_peers_lock);
     }
 
-    // Events take the peer lock inside event_peer_bit() and active_peer_mask(), so they have to
-    // run with it released as well.
-    if (header.type == kPacketWorldEvent || header.type == kPacketWorldEventAck) {
+    // Event transport validates membership and endpoint outside this peer lock.
+    if (header.type == kPacketWorldEvent || header.type == kPacketWorldEventAck ||
+        header.type == kPacketWorldEventStatus) {
         pthread_mutex_unlock(&g_peers_lock);
         handle_event_packet(data, size, addr);
         pthread_mutex_lock(&g_peers_lock);
@@ -3647,7 +3268,7 @@ void net_post_world_event(const WorldEvent& event, bool already_applied) {
 
 size_t net_copy_world_events(WorldEvent* out, size_t max) {
     size_t count = 0;
-    pthread_mutex_lock(&g_event_lock);
+    if (!event_lock_context()) return 0;
     while (count < max && g_event_inbox_tail != g_event_inbox_head) {
         out[count++] = g_event_inbox[g_event_inbox_tail];
         g_event_inbox_tail = (g_event_inbox_tail + 1) % kEventInboxSize;
@@ -3659,8 +3280,13 @@ size_t net_copy_world_events(WorldEvent* out, size_t max) {
 size_t net_pending_world_event_count() {
     size_t count = 0;
     pthread_mutex_lock(&g_event_lock);
-    for (int i = 0; i < kEventRingSize; i++) {
-        if (g_events.slots[i].used) count++;
+    for (const auto& slot : g_events.slots) {
+        if (!slot.used) continue;
+        for (const auto& recipient : g_events.recipients) {
+            if (recipient.used && !recipient.history_lost &&
+                slot.event.sequence >= recipient.first_sequence &&
+                slot.event.sequence > recipient.acknowledged) { ++count; break; }
+        }
     }
     pthread_mutex_unlock(&g_event_lock);
     return count;

@@ -17,7 +17,9 @@ bool build_ladder_readback(void* target,const base_geometry::GhostEnvelope& g,in
     }
     return true;
 }
-bool build_apply_ladder_inner(void* target,const WorldEvent& e,const base_geometry::GhostEnvelope& g) {
+bool build_apply_ladder_inner(void* target,const WorldEvent& e,const base_geometry::GhostEnvelope& wire_geometry) {
+    base_geometry::GhostEnvelope g;
+    if (!build_map_base_geometry(target,wire_geometry,&g)) return true;
     const int h=base_geometry::ladder_height(g,e.tech_type);
     if (!h || g.object_id!=e.object_id || e.face_has_value ||
         !(e.build_flags & kWorldBuildAnchored) || !(e.build_flags & kWorldBuildComplete) ||
@@ -36,7 +38,7 @@ bool build_apply_ladder_inner(void* target,const WorldEvent& e,const base_geomet
         // The game can expose the deconstructor at either end of the same ladder.
         if (!build_hatch_removal_allowed(target,lower,5504) &&
             !build_hatch_removal_allowed(target,upper,5504)) return false;
-        if (!build_bind_removal_identity(e,g)) return true;
+        if (!build_bind_removal_identity(e,wire_geometry)) return true;
     } else {
         if (build_corridor_removed(e.object_id) || build_corridor_record(e,false)) return true;
         HatchFace actual{};
@@ -69,7 +71,7 @@ bool build_apply_ladder_inner(void* target,const WorldEvent& e,const base_geomet
     const bool verified=build_ladder_readback(target,g,h,remove);
     if (!verified) g_ladder_apply_failed=true;
     else if (!remove) {
-        build_remember_corridor(e,g);
+        build_remember_corridor(e,wire_geometry);
         build_corridor_record(e,false)->verified=true;
     }
     LOG_INFO("build: ladder %s id=%s lower=(%d,%d,%d) height=%d verified=%u",

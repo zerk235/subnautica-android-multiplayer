@@ -1,4 +1,6 @@
 // ---------------------------------------------------------------------------
+#include "interior_build.h"
+interior_build::Registry g_locker_registry;
 
 #if defined(SNMOD_BASE_GEOMETRY_APPLY) && !defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 #error "The experimental apply path requires geometry capture and transport"
@@ -577,7 +579,7 @@ BuildKnown* build_known(const WorldEvent& state) {
 }
 
 bool build_payload_valid(const WorldEvent& e) {
-    constexpr uint8_t kBuildFlagMask = kWorldBuildComplete | kWorldBuildIsInside |
+    constexpr uint8_t kBuildFlagMask = kWorldBuildComplete | kWorldBuildIsInside | kWorldBuildInterior |
                                        kWorldBuildForceUpright | kWorldBuildRotatable |
                                        kWorldBuildAttached | kWorldBuildAnchored
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
@@ -614,6 +616,7 @@ bool build_payload_valid(const WorldEvent& e) {
         }
         if (e.face_has_value > 1) return false;
     }
+    if ((e.build_flags & kWorldBuildInterior) && !interior_build::payload_valid(e)) return false;
     float norm = e.qx * e.qx + e.qy * e.qy + e.qz * e.qz + e.qw * e.qw;
     return norm > 0.9f && norm < 1.1f &&
            ((e.build_flags & kWorldBuildComplete) == 0 || e.constructed_amount > 0.999f);
@@ -627,6 +630,13 @@ void queue_remote_build(const WorldEvent& e) {
     if (!build_payload_valid(e)) {
         LOG_WARN("build: refused, payload failed validation");
         return;
+    }
+    if (e.build_flags & kWorldBuildInterior) {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        if (!g_locker_registry.accept(e)) return;
+#else
+        return;
+#endif
     }
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
     if (e.build_flags & kWorldBuildAnchored) {
@@ -881,6 +891,7 @@ void build_handle_remove(const WorldEvent& e) {
         LOG_WARN("build: remove refused, payload failed validation");
         return;
     }
+    if (e.build_flags & kWorldBuildInterior) {queue_remote_build(e);return;}
     // A ConstructableBase can disappear from the Constructable scan while the game is
     // rebuilding/registering base geometry. Absence is not proof of player deconstruction;
     // until we have an explicit deconstruct hook, never let an inferred remove tear down a
@@ -961,6 +972,9 @@ bool g_geometry_cache_session_valid = false;
 #include "base_ladder_apply.inc"
 #endif
 #include "base_build_completion.inc"
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+#include "locker_sync.inc"
+#endif
 
 void build_refresh_geometry_cache_session() {
     uint8_t current[16]{};
@@ -971,6 +985,10 @@ void build_refresh_geometry_cache_session() {
         g_geometry_cache.clear();
         for (auto& pending : g_completed_base_builds) pending = CompletedBaseBuild{};
         for (auto& entry : g_synced_corridors) entry = SyncedCorridor{};
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        g_locker_registry=interior_build::Registry{};
+        for (auto& job:g_build_jobs) if(job.used&&(job.state.build_flags&kWorldBuildInterior))build_finish_job(job);
+#endif
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         for (auto& entry : g_applied_corridors) entry = AppliedCorridor{};
 #endif
@@ -997,6 +1015,13 @@ void build_pump_jobs() {
             build_finish_job(j);
             continue;
         }
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        if (j.state.build_flags & kWorldBuildInterior) {
+            if (build_apply_locker(j.state)) build_finish_job(j);
+            else j.next_try=now+kBuildJobRetrySeconds;
+            continue;
+        }
+#endif
         LOG_INFO("build: stage=classid-before id=%s tech=%d origin=%08x seq=%u",
                  j.state.object_id, j.state.tech_type, j.state.origin_id, j.state.sequence);
         void* class_text = g_build_class_id.call(j.state.tech_type, g_build_class_id.method);
@@ -1179,6 +1204,10 @@ void tick_build_sync(void* /*player*/, const LocalState& local) {
     build_refresh_geometry_cache_session();
     build_install_completion_hook();
     build_install_deconstruction_hook();
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    build_locker_install_hooks();
+    build_locker_send_pending();
+#endif
     build_send_completed();
     base_geometry::GhostEnvelope received_geometry;
     uint32_t geometry_origin = 0;
@@ -1223,6 +1252,11 @@ void tick_build_sync(void* /*player*/, const LocalState& local) {
             continue;
         }
         captured++;
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        // Locker completion/removal is explicit; neither preview polling nor
+        // streaming absence may construct or demolish an interior container.
+        if (state.tech_type==interior_build::kLocker) continue;
+#endif
 
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
         // A preview can already have amount=1 and _constructed=true. Polling its

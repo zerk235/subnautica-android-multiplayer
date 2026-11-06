@@ -56,8 +56,7 @@ inline int face_direction(const GhostEnvelope& e,int32_t tech) {
 inline bool same_structural_face(const GhostEnvelope& a,const GhostEnvelope& b) {
     int d=face_direction(a,face_descriptor_tech(a));
     return d>=0 && d==face_direction(b,face_descriptor_tech(b)) &&
-        a.target_base_id==b.target_base_id && a.target_base_anchor==b.target_base_anchor &&
-        a.target_offset==b.target_offset;
+        same_target_cell(a,b);
 }
 // Original hatch-only policy retained for regression fixtures and older callers.
 inline GhostEnvelope hatch_descriptor(GhostEnvelope e,std::array<int32_t,3> cell,int direction) {

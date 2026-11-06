@@ -31,6 +31,30 @@ struct GhostEnvelope {
     Snapshot geometry;
 };
 
+// CopyFrom adds EnsureSize's index shift to Base.anchor. The physical cell is
+// therefore (target_offset - target_base_anchor), even after negative expansion.
+inline int64_t relative_target_cell(const GhostEnvelope& e,size_t axis) {
+    return int64_t(e.target_offset[axis])-e.target_base_anchor[axis];
+}
+inline bool same_target_cell(const GhostEnvelope& a,const GhostEnvelope& b) {
+    if (a.target_base_id.empty() || a.target_base_id!=b.target_base_id) return false;
+    for (size_t i=0;i<3;++i) if (relative_target_cell(a,i)!=relative_target_cell(b,i)) return false;
+    return true;
+}
+inline bool remap_target_anchor(const GhostEnvelope& source,const std::array<int32_t,3>& anchor,GhostEnvelope* out) {
+    if (!out) return false;
+    std::array<int32_t,3> cell{};
+    for (size_t i=0;i<3;++i) {
+        const auto v=relative_target_cell(source,i)+anchor[i];
+        if (anchor[i]<-8192 || anchor[i]>8192 || source.target_base_anchor[i]<-8192 ||
+            source.target_base_anchor[i]>8192 || source.target_offset[i]<-8192 ||
+            source.target_offset[i]>8192 || v<-8192 || v>8192) return false;
+        cell[i]=int32_t(v);
+    }
+    *out=source;out->target_offset=cell;out->target_base_anchor=anchor;
+    return true;
+}
+
 inline bool printable_id(const std::string& s, size_t maximum, bool allow_empty) {
     if (s.size() > maximum || (!allow_empty && s.empty())) return false;
     for (unsigned char c : s) if (c < 0x20 || c > 0x7e) return false;

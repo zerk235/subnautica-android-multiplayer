@@ -185,8 +185,10 @@ bool build_corridor_storage_valid(void* base, const base_geometry::Snapshot& sna
 #include "base_detached_removal.inc"
 
 bool build_apply_completed_corridor_inner(void* prefab, void* target, const WorldEvent& e,
-                                         const base_geometry::GhostEnvelope& snapshot,
+                                          const base_geometry::GhostEnvelope& wire_snapshot,
                                          CorridorAttempt& attempt) {
+    auto snapshot=wire_snapshot;
+    if (target && !snapshot.creates_base && !build_map_base_geometry(target,wire_snapshot,&snapshot)) return false;
     if (!build_payload_valid(e) || !(e.build_flags & kWorldBuildComplete) || e.face_has_value ||
         !base_geometry::supported_piece_placement(snapshot, e.tech_type) ||
         snapshot.object_id != e.object_id || !build_live(prefab) || (!snapshot.creates_base && !build_live(target)) ||
@@ -201,7 +203,7 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
         auto* record=build_corridor_record(e,true);
         record->used=true;record->verified=true;record->origin=e.origin_id;
         snprintf(record->object_id,sizeof(record->object_id),"%s",e.object_id);
-        build_remember_corridor(e,snapshot);
+        build_remember_corridor(e,wire_snapshot);
         build_record_piece_root(e,target);
         LOG_INFO("build: existing first base adopted id=%s base=%s",e.object_id,snapshot.target_base_id.c_str());
         return true;
@@ -388,18 +390,21 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
         const bool id_matches=string_to_ascii(g_unique_get_id.call(base_uid,g_unique_get_id.method),actual_id,sizeof(actual_id)) &&
             snapshot.target_base_id==actual_id;
         record->verified=transitioned && id_matches && build_created_base_present(target,e,snapshot);
-        if (record->verified) {build_remember_corridor(e,snapshot);build_record_piece_root(e,target);}
+        if (record->verified) {build_remember_corridor(e,wire_snapshot);build_record_piece_root(e,target);}
         LOG_INFO("build: first base created id=%s base=%s tech=%d identity=%u verified=%u",e.object_id,
             snapshot.target_base_id.c_str(),e.tech_type,unsigned(id_matches),unsigned(record->verified));
         return record->verified;
     }
+    // CopyFrom may have shifted every cell and Base.anchor. Verify in the new
+    // native frame, while keeping the immutable wire snapshot for later removal.
+    if (!build_map_base_geometry(target,wire_snapshot,&snapshot)) return false;
     const BuildGridPoint cell{snapshot.target_offset[0], snapshot.target_offset[1], snapshot.target_offset[2]};
     const uint8_t actual = build_live(target) ?
         g_corridor_api.get_cell.call(target, cell, g_corridor_api.get_cell.method) : 255;
     record->verified = transitioned && actual == base_geometry::piece_cell_type(e.tech_type) && build_corridor_glass_matches(target, cell, e.tech_type);
     if (record->verified && e.tech_type==5509) record->verified=build_foundation_footprint_matches(target,snapshot,false);
     if (record->verified && e.tech_type==5500) record->verified=build_room_footprint_matches(target,snapshot,false);
-    if (record->verified) {build_remember_corridor(e,snapshot);build_record_piece_root(e,target);}
+    if (record->verified) {build_remember_corridor(e,wire_snapshot);build_record_piece_root(e,target);}
     LOG_INFO("build: corridor applied id=%s transition=%u target_cell=%u verified=%u tech=%d",
              e.object_id, static_cast<unsigned>(transitioned), static_cast<unsigned>(actual),
              static_cast<unsigned>(record->verified), e.tech_type);

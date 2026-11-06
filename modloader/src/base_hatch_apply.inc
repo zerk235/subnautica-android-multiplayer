@@ -49,7 +49,9 @@ bool build_hatch_removal_allowed(void* target,HatchFace face,int32_t tech) {
 }
 // true = finished/refused; false = retry before any mutation.
 #include "base_dome_apply.inc"
-bool build_apply_hatch_inner(void* target,const WorldEvent& e,const base_geometry::GhostEnvelope& geometry) {
+bool build_apply_hatch_inner(void* target,const WorldEvent& e,const base_geometry::GhostEnvelope& wire_geometry) {
+    base_geometry::GhostEnvelope geometry;
+    if (!build_map_base_geometry(target,wire_geometry,&geometry)) return true;
     const int direction=base_geometry::face_direction(geometry,e.tech_type);
     const int face_type=base_geometry::face_type_for_tech(e.tech_type);
     if (direction<0 || geometry.object_id!=e.object_id || e.face_has_value ||
@@ -67,7 +69,7 @@ bool build_apply_hatch_inner(void* target,const WorldEvent& e,const base_geometr
         if (build_face_has_replacement(geometry,e.object_id)) return true;
         if (current!=face_type) return true;
         if (!build_hatch_removal_allowed(target,face,e.tech_type)) return false;
-        if (!build_bind_removal_identity(e,geometry)) return true;
+        if (!build_bind_removal_identity(e,wire_geometry)) return true;
     } else {
         if (build_corridor_removed(e.object_id) || build_corridor_record(e,false)) return true;
         if ((current!=0 && current!=1) || (e.tech_type==5540 && current!=1)) {
@@ -91,7 +93,7 @@ bool build_apply_hatch_inner(void* target,const WorldEvent& e,const base_geometr
     const uint8_t actual=g_hatch_capture.get_face.call(target,face,g_hatch_capture.get_face.method);
     const bool verified=remove ? (e.tech_type==5540 ? actual==1 : (actual==0 || actual==1)) : actual==face_type;
     if (verified && !remove) {
-        build_remember_corridor(e,geometry);
+        build_remember_corridor(e,wire_geometry);
         build_corridor_record(e,false)->verified=true;
     }
     if (!verified) g_hatch_apply.failed=true;

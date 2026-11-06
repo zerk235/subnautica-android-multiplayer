@@ -67,6 +67,7 @@ Record* build_corridor_record(const WorldEvent& e,bool allocate) {
     return i!=records.end() ? &i->second : allocate ? &records[e.object_id] : nullptr;
 }
 int g_applying_remote=0;
+bool build_map_base_geometry(void*,const base_geometry::GhostEnvelope& source,base_geometry::GhostEnvelope* out){return base_geometry::remap_target_anchor(source,{},out);}
 #include "modloader/src/base_hatch_apply.inc"
 void set_face(void*,HatchFace,uint8_t type,void*) {
     ++writes;
@@ -93,6 +94,13 @@ base_geometry::GhostEnvelope geometry(const WorldEvent& e,int d) {
     return base_geometry::face_descriptor(g,{2,0,3},d,e.tech_type);
 }
 int main() {
+    reset();auto shifted=event(5505,"shifted-window");auto old_frame=geometry(shifted,0);
+    old_frame.target_offset[0]-=4;old_frame.target_base_anchor[0]-=4;
+    candidate.recipe=5505;
+    assert(build_apply_hatch(&target_token,shifted,old_frame)&&writes==1&&current==2);
+    shifted.kind=kWorldEventRemove;
+    assert(build_apply_hatch(&target_token,shifted,old_frame)&&writes==2&&current==1);
+    assert(build_synced_corridor(shifted.object_id)->geometry.target_offset==old_frame.target_offset);
     for(int tech:{5501,5505,5514,5540}) {
         reset();auto loaded=event(tech,"loaded");loaded.kind=kWorldEventRemove;
         const int direction=tech==5540 ? 4 : 0;

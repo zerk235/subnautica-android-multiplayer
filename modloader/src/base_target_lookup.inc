@@ -1,8 +1,44 @@
-bool build_corridor_storage_valid(void* base, const base_geometry::Snapshot& snapshot);
+#include "base_live_storage.inc"
+
+bool build_map_base_geometry(void* target,const base_geometry::GhostEnvelope& source,base_geometry::GhostEnvelope* out) {
+    if (!build_live(target)) return false;
+    std::array<int32_t,3> anchor{};
+    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(target),g_ghost_capture.anchor,anchor.data());
+    return base_geometry::remap_target_anchor(source,anchor,out);
+}
+
+bool build_recorded_frame_matches(void* target,const SyncedCorridor& entry) {
+    if (!entry.root_pose_valid || !build_resolve_hatch_capture()) return false;
+    base_geometry::GhostEnvelope mapped;
+    if (!build_map_base_geometry(target,entry.geometry,&mapped)) return false;
+    const auto& cell=mapped.target_offset;
+    const auto point=g_hatch_capture.grid_world.call(target,{cell[0],cell[1],cell[2]},g_hatch_capture.grid_world.method);
+    void* go=g_get_game_object.call(target,g_get_game_object.method);
+    void* tf=go ? g_gameobject_get_transform.call(go,g_gameobject_get_transform.method) : nullptr;
+    if (!tf) return false;
+    const auto q=g_get_rotation.call(tf,g_get_rotation.method);
+    const auto& recorded=entry.root_pose;
+    const float dx=point.x-recorded[0],dy=point.y-recorded[1],dz=point.z-recorded[2];
+    const float distance=dx*dx+dy*dy+dz*dz;
+    const float dot=q.x*recorded[3]+q.y*recorded[4]+q.z*recorded[5]+q.w*recorded[6];
+    return std::isfinite(distance) && std::isfinite(dot) && distance<=0.0004f && std::fabs(dot)>=0.9999f;
+}
+
+bool build_recorded_base_frame_ready(void* target,const std::string& id) {
+    bool matched=false;
+    for (const auto& entry:g_synced_corridors) {
+        if (!entry.used || !entry.root_pose_valid || entry.geometry.target_base_id!=id) continue;
+        if (!build_recorded_frame_matches(target,entry)) return false;
+        matched=true;
+    }
+    return matched;
+}
 
 // Base.OnProtoDeserialize sets isPlaced, but BaseGhost.Finish can create a complete
 // live base with that flag still false. Only a successfully recorded session birth
-// can replace that flag: require its original grid/world frame and native storage.
+// can replace that flag: require its original transform and native storage. The
+// integer grid is reindexed by EnsureSize when extending towards negative cells;
+// the old birth cell's integer index is not a stable world-space reference.
 bool build_session_base_frame_ready(void* target,const std::string& id) {
     const SyncedCorridor* birth=nullptr;
     for (const auto& entry:g_synced_corridors) {
@@ -10,19 +46,15 @@ bool build_session_base_frame_ready(void* target,const std::string& id) {
         if (birth) return false;
         birth=&entry;
     }
-    if (!birth || !birth->root_pose_valid || !build_resolve_hatch_capture()) return false;
-    int32_t shape[4]{};
-    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(target),g_ghost_capture.shape,shape);
-    base_geometry::Snapshot storage;
-    storage.shape={shape[0],shape[1],shape[2]};
-    if (!build_corridor_storage_valid(target,storage)) return false;
-    const auto& cell=birth->geometry.target_offset;
-    const auto point=g_hatch_capture.grid_world.call(target,{cell[0],cell[1],cell[2]},g_hatch_capture.grid_world.method);
+    if (!birth || !build_recorded_frame_matches(target,*birth)) return false;
+    if (!base_geometry::valid_base_pose(birth->geometry) ||
+        !build_completed_base_storage_valid(target)) return false;
     void* go=g_get_game_object.call(target,g_get_game_object.method);
     void* transform=go ? g_gameobject_get_transform.call(go,g_gameobject_get_transform.method) : nullptr;
     if (!transform) return false;
+    const auto point=g_get_position.call(transform,g_get_position.method);
     const auto q=g_get_rotation.call(transform,g_get_rotation.method);
-    const auto& recorded=birth->root_pose;
+    const auto& recorded=birth->geometry.base_pose;
     const float dx=point.x-recorded[0],dy=point.y-recorded[1],dz=point.z-recorded[2];
     const float distance=dx*dx+dy*dy+dz*dz;
     const float dot=q.x*recorded[3]+q.y*recorded[4]+q.z*recorded[5]+q.w*recorded[6];
@@ -63,6 +95,14 @@ void* build_corridor_target(const std::string& expected_id, const std::array<int
         il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate), g_ghost_capture.anchor, anchor);
         anchor_matches = anchor[0] == expected_anchor[0] && anchor[1] == expected_anchor[1] &&
                          anchor[2] == expected_anchor[2];
+        if (require_anchor && !anchor_matches && build_recorded_base_frame_ready(candidate,expected_id)) {
+            anchor_matches=true;
+            if (build_now()>=next_report) {
+                next_report=build_now()+5;
+                LOG_INFO("build: target anchor translated id=%s actual=(%d,%d,%d) snapshot=(%d,%d,%d)",
+                    id,anchor[0],anchor[1],anchor[2],expected_anchor[0],expected_anchor[1],expected_anchor[2]);
+            }
+        }
         if(require_anchor && !anchor_matches && build_now()>=next_report) {
             next_report=build_now()+5;
             LOG_INFO("build: target anchor deferred id=%s actual=(%d,%d,%d) expected=(%d,%d,%d)",id,anchor[0],anchor[1],anchor[2],expected_anchor[0],expected_anchor[1],expected_anchor[2]);

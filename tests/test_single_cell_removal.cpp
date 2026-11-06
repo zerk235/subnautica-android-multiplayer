@@ -18,6 +18,8 @@ std::vector<Candidate*> candidates{&candidate};
 uint8_t current=6;bool glass_ok=true,throw_clear=false,corrupt_clear=false;
 unsigned writes=0,rebuilds=0;
 unsigned destroys=0,pre_destroys=0;
+std::array<int32_t,3> target_anchor{};
+bool build_map_base_geometry(void*,const base_geometry::GhostEnvelope& source,base_geometry::GhostEnvelope* out){return base_geometry::remap_target_anchor(source,target_anchor,out);}
 bool build_live(void* p){return p!=nullptr;}
 void il2cpp_field_get_value(Il2CppObject* obj,void* f,void* out){
     if(f==&cells_field){assert(obj==reinterpret_cast<Il2CppObject*>(&target_token));*static_cast<void**>(out)=&cell_array;return;}
@@ -72,6 +74,7 @@ bool build_room_footprint_matches(void*,const base_geometry::GhostEnvelope&,bool
 #include "modloader/src/base_corridor_remove.inc"
 
 void reset(){
+    target_anchor={};
     for(auto& e:g_synced_corridors)e=SyncedCorridor{};
     candidate=Candidate{};candidates={&candidate};cell_array.data[0]=6;cell_array.data[1]=4;
     current=6;glass_ok=true;throw_clear=corrupt_clear=false;writes=rebuilds=destroys=pre_destroys=0;
@@ -94,6 +97,14 @@ void remember(const WorldEvent& e,const base_geometry::GhostEnvelope& g){
     build_remember_corridor(e,g);build_synced_corridor(e.object_id)->removed=true;
 }
 int main(){
+    // Expanding to negative cells changes both the grid index and its anchor.
+    // The immutable pre-expansion snapshot must still remove the exact handle.
+    reset();auto shifted=make_event(5509,"negative-foundation");auto before=make_geometry(shifted);
+    before.target_offset={-2,1,3};before.target_base_anchor={-6,0,0};
+    candidate.recipe=5509;candidate.bounds[3]++;candidate.bounds[5]++;current=2;
+    remember(shifted,before);
+    assert(build_apply_corridor_removal(&target_token,shifted,before)&&writes==1&&current==0);
+    assert(build_synced_corridor(shifted.object_id)->geometry.target_offset==before.target_offset);
     // Last cell of a newly shared base follows the native destroy branch.
     reset();auto born=make_event(5510,"first-corridor");auto birth=make_geometry(born);
     birth.creates_base=true;birth.base_pose={0,0,0,0,0,0,1};

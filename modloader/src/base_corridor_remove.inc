@@ -9,10 +9,12 @@ bool build_apply_corridor_removal_inner(void* target, const WorldEvent& e,
         return true;
     }
     if (build_cell_has_replacement(geometry,e.object_id)) return true;
+    base_geometry::GhostEnvelope physical;
+    if (!build_map_base_geometry(target,geometry,&physical)) return true;
     const bool may_remove_last=build_base_birth_known(geometry.target_base_id);
     if (!build_resolve_corridor_removal()) return true;
     auto& a = g_corridor_removal_api;
-    const BuildGridPoint cell{geometry.target_offset[0], geometry.target_offset[1], geometry.target_offset[2]};
+    const BuildGridPoint cell{physical.target_offset[0], physical.target_offset[1], physical.target_offset[2]};
     const uint8_t current = g_corridor_api.get_cell.call(target, cell, g_corridor_api.get_cell.method);
     if (current == 0) return true;
     if (current != base_geometry::piece_cell_type(e.tech_type)) { LOG_WARN("build: corridor removal refused: cell changed type id=%s", e.object_id); return true; }
@@ -21,8 +23,8 @@ bool build_apply_corridor_removal_inner(void* target, const WorldEvent& e,
         return true;
     }
     if (base_geometry::multi_cell_piece(e.tech_type)) {
-        if (!(e.tech_type==5500 ? build_room_footprint_matches(target,geometry,false) :
-              build_foundation_footprint_matches(target,geometry,false)) ||
+        if (!(e.tech_type==5500 ? build_room_footprint_matches(target,physical,false) :
+              build_foundation_footprint_matches(target,physical,false)) ||
             (!may_remove_last && !build_foundation_has_other_root(target))) return true;
     } else {
     // Never remove the final cell/base through this first implementation.
@@ -48,7 +50,7 @@ bool build_apply_corridor_removal_inner(void* target, const WorldEvent& e,
         il2cpp_field_get_value(object, a.recipe, &recipe);
         il2cpp_field_get_value(object, a.face, face);
         if (recipe != e.tech_type || face[0] ||
-            !base_geometry::piece_deconstruction_bounds(geometry,e.tech_type,bounds)) continue;
+            !base_geometry::piece_deconstruction_bounds(physical,e.tech_type,bounds)) continue;
         void* go = g_get_game_object.call(candidate, g_get_game_object.method);
         bool belongs = false;
         walk_parents(go, [&](void* node) {
@@ -91,8 +93,8 @@ bool build_apply_corridor_removal_inner(void* target, const WorldEvent& e,
         stage = "rebuild"; a.rebuild.call(target, a.rebuild.method);
         const uint8_t actual = g_corridor_api.get_cell.call(target, cell, g_corridor_api.get_cell.method);
         const bool verified=actual==0 &&
-            (e.tech_type!=5509 || build_foundation_footprint_matches(target,geometry,true)) &&
-            (e.tech_type!=5500 || build_room_footprint_matches(target,geometry,true));
+            (e.tech_type!=5509 || build_foundation_footprint_matches(target,physical,true)) &&
+            (e.tech_type!=5500 || build_room_footprint_matches(target,physical,true));
         LOG_INFO("build: corridor removed id=%s target_cell=%u verified=%u tech=%d", e.object_id, actual, unsigned(verified),e.tech_type);
         if (!verified) g_corridor_removal_failed = true;
     } catch (...) {

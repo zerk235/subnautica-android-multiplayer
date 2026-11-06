@@ -108,6 +108,7 @@ bool build_hatch_removal_allowed(void*,HatchFace f,int tech){assert(tech==5504);
 struct {Entry<decltype(&set_face)>set_face{&::set_face};Entry<decltype(&clear_face)>clear_face{&::clear_face};}g_hatch_apply;
 struct {Entry<decltype(&rebuild)>fix_floors{&::rebuild},fix_links{&::fix_links},rebuild{&::rebuild};}g_corridor_removal_api;
 int g_applying_remote=0;
+bool build_map_base_geometry(void*,const base_geometry::GhostEnvelope& source,base_geometry::GhostEnvelope* out){return base_geometry::remap_target_anchor(source,{},out);}
 #include "modloader/src/base_ladder_apply.inc"
 void reset(int h=3){
     height=h;capturing=false;permission=true;bad_exit=deny_set=bad_readback=throw_write=false;
@@ -127,6 +128,12 @@ base_geometry::GhostEnvelope geometry(const WorldEvent& e){
 int main(){
     g_ladder_capture.ready=true;g_ladder_capture.get_cell.call=&cell;
     g_ladder_capture.exit_cell.call=&exit_cell;g_ladder_capture.can_set.call=&can_set;
+    reset();auto shifted=event("shifted-ladder");auto old_frame=geometry(shifted);
+    old_frame.target_offset[0]-=4;old_frame.target_base_anchor[0]-=4;
+    assert(build_apply_ladder(&target_token,shifted,old_frame)&&writes==height);
+    shifted.kind=kWorldEventRemove;
+    assert(build_apply_ladder(&target_token,shifted,old_frame)&&clears==1);
+    assert(build_synced_corridor(shifted.object_id)->geometry.target_offset==old_frame.target_offset);
     // Actual capture: both picked ends normalize to one canonical identity.
     for(height=2;height<=16;++height)for(int d:{4,5}){
         first_direction=d;

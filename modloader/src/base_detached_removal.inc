@@ -4,13 +4,17 @@
 void build_record_piece_root(const WorldEvent& state,void* completed_base=nullptr) {
     auto* entry=build_synced_corridor(state.object_id);
     if (!entry || entry->removed || base_geometry::piece_cell_type(state.tech_type)<0 ||
-        !build_base_birth_known(entry->geometry.target_base_id) || !build_resolve_hatch_capture()) return;
+        !build_resolve_hatch_capture()) return;
     const auto& geometry=entry->geometry;
     // The caller may own the just-completed native Base. Its placementGhost is
     // destroyed at end-of-frame, so the normal replay lookup still sees it busy.
     void* target=completed_base ? completed_base : build_corridor_target(geometry.target_base_id,geometry.target_base_anchor,false);
     if (!target) return;
-    const auto& cell=geometry.target_offset;
+    std::array<int32_t,3> anchor{};
+    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(target),g_ghost_capture.anchor,anchor.data());
+    base_geometry::GhostEnvelope mapped;
+    if (!base_geometry::remap_target_anchor(geometry,anchor,&mapped)) return;
+    const auto& cell=mapped.target_offset;
     auto p=g_hatch_capture.grid_world.call(target,{cell[0],cell[1],cell[2]},g_hatch_capture.grid_world.method);
     void* go=g_get_game_object.call(target,g_get_game_object.method);
     void* tf=go ? g_gameobject_get_transform.call(go,g_gameobject_get_transform.method) : nullptr;

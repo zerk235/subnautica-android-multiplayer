@@ -7,8 +7,7 @@
 
 namespace base_geometry {
 inline bool same_corridor_cell(const GhostEnvelope& a, const GhostEnvelope& b) {
-    return !a.target_base_id.empty() && a.target_base_id == b.target_base_id &&
-           a.target_base_anchor == b.target_base_anchor && a.target_offset == b.target_offset;
+    return same_target_cell(a,b);
 }
 // Android 1.22.83315 TechType and BaseAddCorridorGhost.Corridor values.
 // All six prefabs use the same single-cell placement path. Rooms and face
@@ -101,12 +100,11 @@ inline bool supported_piece_placement(const GhostEnvelope& e,int32_t tech) {
                            supported_existing_piece(e,tech);
 }
 inline bool piece_footprints_overlap(const GhostEnvelope& a,const GhostEnvelope& b) {
-    if (a.target_base_id.empty() || a.target_base_id!=b.target_base_id ||
-        a.target_base_anchor!=b.target_base_anchor) return false;
+    if (a.target_base_id.empty() || a.target_base_id!=b.target_base_id) return false;
     for (size_t i=0;i<3;++i) {
         if (a.geometry.shape[i]<=0 || b.geometry.shape[i]<=0 ||
-            int64_t(a.target_offset[i])+a.geometry.shape[i]<=b.target_offset[i] ||
-            int64_t(b.target_offset[i])+b.geometry.shape[i]<=a.target_offset[i]) return false;
+            relative_target_cell(a,i)+a.geometry.shape[i]<=relative_target_cell(b,i) ||
+            relative_target_cell(b,i)+b.geometry.shape[i]<=relative_target_cell(a,i)) return false;
     }
     return true;
 }
