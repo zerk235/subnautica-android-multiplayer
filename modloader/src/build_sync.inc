@@ -1,5 +1,4 @@
 // ---------------------------------------------------------------------------
-#include "interior_build.h"
 interior_build::Registry g_locker_registry;
 
 #if defined(SNMOD_BASE_GEOMETRY_APPLY) && !defined(SNMOD_BASE_GEOMETRY_CAPTURE)

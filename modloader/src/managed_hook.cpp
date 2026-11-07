@@ -16,6 +16,7 @@
 #include "log.h"
 #include "launch_role_bridge.h"
 #include "net.h"
+#include "interior_build.h"
 #include "held_light.h"
 #include "base_geometry_envelope.h"
 #include "base_geometry_cache.h"

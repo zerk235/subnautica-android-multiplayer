@@ -10,7 +10,11 @@ This is a public preview demo. The Android installer passed a clean game install
 
 **0.3.3 adds live-tested floor Locker construction, placement and demolition from host to guest, plus support for attaching pieces to new bases. Locker contents are not shared.**
 
-**[Download installer 0.3.3 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.3-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.3-installer-preview)
+**[Download installer 0.3.4 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.4-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.4-installer-preview)
+
+**0.3.4 removes the 64-identity lifetime limit for lockers in a session.** The
+registry grows with construction and retains removal records so delayed build
+messages cannot resurrect dismantled lockers. [Release notes](docs/releases/0.3.4-installer-preview.md).
 
 **0.3.2 fixes base demolition and repeat joining.** Two complete build/dismantle
 cycles of a new standalone straight corridor passed on the two test phones.
@@ -20,7 +24,7 @@ Update the installer over the existing app, keep its data, save and exit to the
 game menu, then **Prepare mod → Install prepared mod on both phones**. The native
 mod changed; protocol is now 27, and both players need matching mod builds.
 Do not manually uninstall the game to bypass a clone warning.
-[Release notes (Russian)](docs/releases/0.3.3-installer-preview.md).
+[0.3.3 release notes](docs/releases/0.3.3-installer-preview.md).
 Diagnostics from 0.3.1 remain available: [report guide (Russian)](docs/DIAGNOSTICS.md).
 
 **November 5 update:** the installer now has **“Запустить хостом” (Launch as host)**
@@ -29,8 +33,9 @@ downloaded world. Autoload after switching roles retains the former host's origi
 When upgrading from 0.2, update SN Multiplayer Installer over the existing app,
 save your game and return to its main menu, then run **Prepare mod → Install
 prepared mod** on both phones. Keep the installer's data: it holds your update key.
-Both players must update the mod: protocol **25** is incompatible with the previous
-public protocol 23 build. [Release notes](docs/releases/0.3.0-installer-preview.md).
+The current release requires protocol **27** and matching builds on both phones;
+older public protocols **23** and **25** are incompatible.
+[Host-selection history in 0.3](docs/releases/0.3.0-installer-preview.md).
 
 Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
 its resources. The installer runs on the phone without a PC or root and does not

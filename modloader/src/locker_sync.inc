@@ -88,7 +88,7 @@ bool build_locker_capture(void* c,WorldEvent* out) {
 
 void build_locker_queue(WorldEvent state,uint8_t kind) {
     state.kind=kind;state.origin_id=state.sequence=0;
-    if(!g_locker_registry.accept(state)){LOG_WARN("locker: identity/capacity refused id=%s",state.object_id);return;}
+    if(!g_locker_registry.accept(state)){LOG_WARN("locker: identity/allocation refused id=%s",state.object_id);return;}
     auto* r=g_locker_registry.find(state.object_id);r->publish=true;
     r->next_send=0;r->expires=build_now()+kBuildJobDeadlineSeconds;
     LOG_INFO("locker: confirmed %s id=%s parent=%02x%02x%02x%02x local=(%.3f,%.3f,%.3f)",
@@ -141,8 +141,9 @@ void build_locker_install_hooks() {
 }
 void build_locker_send_pending() {
     const double now=build_now();
-    for(auto& r:g_locker_registry.records) {
-        if(!r.used||!r.publish)continue;
+    for(auto& entry:g_locker_registry.records) {
+        auto& r=entry.second;
+        if(!r.publish)continue;
         if(now>r.expires){r.publish=false;continue;}
         if(now<r.next_send||!net_peer_count())continue;
         net_post_world_event(r.state,true);r.next_send=now+kBuildRepairSeconds;

@@ -34,9 +34,33 @@ int main() {
     assert(registry.accept(removed)); // duplicate demolition is idempotent
     auto rebuilt=locker("locker-two");assert(registry.accept(rebuilt)); // same pose, new ID
     assert(registry.find(e.object_id)->removed&&!registry.find(rebuilt.object_id)->removed);
-    for(int i=2;i<64;++i){char id[40];std::snprintf(id,sizeof(id),"locker-%d",i);assert(registry.accept(locker(id)));}
-    assert(!registry.accept(locker("overflow")));
-    assert(registry.accept(removed)); // capacity cannot evict a tombstone
+    auto* original=registry.find(e.object_id);
+    original->removal_applied=true;
+    original->next_send=123.0;
+    assert(!registry.find("not-registered"));
+    // Building and dismantling many distinct lockers must not exhaust a
+    // lifetime quota, even when very few lockers remain in the world.
+    for(int i=2;i<2048;++i){
+        char id[40];std::snprintf(id,sizeof(id),"locker-%d",i);
+        auto created=locker(id);assert(registry.accept(created));
+        if(i%2==0){
+            auto demolished=created;demolished.kind=kWorldEventRemove;
+            assert(registry.accept(demolished));
+            assert(!registry.accept(created)); // no resurrection after growth
+        }
+    }
+    assert(registry.records.size()==2048);
+    assert(registry.find(e.object_id)==original); // pending references stay valid
+    assert(original->removal_applied&&original->next_send==123.0);
+    assert(registry.accept(removed));
+    assert(!registry.accept(e)); // oldest tombstone is still present
+    assert(registry.accept(rebuilt)); // oldest live record still works
+    auto remove_first=locker("remove-before-build");remove_first.kind=kWorldEventRemove;
+    assert(registry.accept(remove_first));
+    remove_first.kind=kWorldEventBuild;assert(!registry.accept(remove_first));
+    moved=removed;moved.interior_local_pose[0]=.1f;assert(!registry.accept(moved));
+    registry=Registry{};
+    assert(registry.records.empty()&&registry.accept(e));
 
     // Production hooks use these observers: hover/cancel, partial deconstruction,
     // remote replay and failed native transitions must not publish locker events.
@@ -60,5 +84,5 @@ int main() {
         assert(sends-before==int(amount==0&&!complete&&!remote&&ready&&!preview&&success));
     }
     assert(!observed.accept(e));
-    puts("PASS: locker exact parent/pose, malformed payload, explicit transitions, immutable identity, removal tombstones and bounded capacity");
+    puts("PASS: locker exact parent/pose, malformed payload, explicit transitions, 2048 identities, stable references, retained tombstones and session reset");
 }

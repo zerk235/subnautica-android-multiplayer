@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <map>
+#include <new>
+#include <string>
 
 namespace interior_build {
 constexpr int kLocker=1504;
@@ -29,18 +32,26 @@ inline bool same_placement(const WorldEvent& a,const WorldEvent& b) {
     return std::isfinite(distance)&&std::isfinite(dot)&&distance<=0.0004f&&std::fabs(dot)>=0.9999f;
 }
 struct Record {
-    bool used=false,removed=false,removal_applied=false,publish=false;
+    bool removed=false,removal_applied=false,publish=false;
     WorldEvent state{};
     double next_send=0,expires=0;
 };
 struct Registry {
-    Record records[64]{};
+    // Entries, including removal tombstones, live until the session changes.
+    // A node-based map grows without invalidating Record pointers and avoids
+    // imposing a lifetime construction limit on an otherwise empty base.
+    std::map<std::string,Record,std::less<>> records;
     Record* find(const char* id,bool allocate=false) {
-        Record* empty=nullptr;
-        for(auto& r:records){if(r.used&&!std::strcmp(r.state.object_id,id))return &r;if(!r.used&&!empty)empty=&r;}
-        if(!allocate||!empty)return nullptr;
-        empty->used=true;std::snprintf(empty->state.object_id,sizeof(empty->state.object_id),"%s",id);
-        return empty;
+        const auto existing=records.find(id);
+        if(existing!=records.end())return &existing->second;
+        if(!allocate)return nullptr;
+        try {
+            auto& record=records.try_emplace(id).first->second;
+            std::snprintf(record.state.object_id,sizeof(record.state.object_id),"%s",id);
+            return &record;
+        } catch(const std::bad_alloc&) {
+            return nullptr;
+        }
     }
     bool accept(const WorldEvent& e) {
         if(!payload_valid(e))return false;
