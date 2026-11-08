@@ -194,6 +194,7 @@ bool build_apply_locker(const WorldEvent& e) {
                 return complete&&build_locker_storage(g_get_game_object.call(existing,g_get_game_object.method),true);
             }
             void* go=g_get_game_object.call(existing,g_get_game_object.method);
+            if(contents_locker_busy(e.object_id))return false;
             void* storage=build_locker_storage(go,true);void* reason=nullptr;
             if(!storage||!g_locker_api.empty.call(storage,g_locker_api.empty.method)||
                !g_locker_api.allowed.call(existing,&reason,g_locker_api.allowed.method)) {

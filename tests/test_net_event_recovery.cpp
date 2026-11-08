@@ -232,6 +232,17 @@ int main() {
     assert(decoded[0].tech_type==1504&&decoded[0].build_flags==interior.build_flags);
     assert(!memcmp(decoded[0].interior_parent_guid,interior.interior_parent_guid,16));
     assert(!memcmp(decoded[0].interior_local_pose,local_pose,sizeof(local_pose)));
+    // Locker payload is opaque: byte values may include zero, NaN bit patterns
+    // and unterminated strings. Only kind 6 may use this alternative layout.
+    ++g_session.epoch;activate(a,c);
+    WorldEvent contents{};contents.kind=kWorldEventLockerContents;
+    constexpr size_t start=offsetof(WorldEvent,guid),length=sizeof(WorldEvent)-start;
+    contents.reserved16=length;
+    for(size_t i=0;i<length;++i)reinterpret_cast<uint8_t*>(&contents)[start+i]=uint8_t(0xff-i);
+    assert(net_try_post_world_event(contents));service();
+    packets=read_packets(c);activate(c,a);feed(packets,a);
+    assert(net_copy_world_events(decoded,4)==1&&decoded[0].kind==kWorldEventLockerContents);
+    assert(decoded[0].reserved16==length&&!memcmp(reinterpret_cast<uint8_t*>(decoded)+start,reinterpret_cast<uint8_t*>(&contents)+start,length));
     close(a.socket); close(b.socket); close(c.socket);
     puts("PASS: real UDP ordered first packet, lost ACK, 31s outage, offline actions, endpoint/slot reuse, new recipient baseline, forged ACK gates, bounded history gap and session reset");
 }

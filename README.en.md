@@ -8,24 +8,19 @@ This is a public preview demo. The Android installer passed a clean game install
 
 ## Download and install
 
-**0.3.3 adds live-tested floor Locker construction, placement and demolition from host to guest, plus support for attaching pieces to new bases. Locker contents are not shared.**
+**[Download installer 0.3.5 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.5-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.5-installer-preview)
 
-**[Download installer 0.3.4 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.4-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.4-installer-preview)
+**0.3.5 adds shared floor Locker contents.** Resource transfers in both directions,
+exact item counts, a battery retaining 57% charge, and three saved items surviving
+a full restart of both games passed on the two test phones.
+[Release notes and limitations (Russian)](docs/releases/0.3.5-installer-preview.md).
 
-**0.3.4 removes the 64-identity lifetime limit for lockers in a session.** The
-registry grows with construction and retains removal records so delayed build
-messages cannot resurrect dismantled lockers. [Release notes](docs/releases/0.3.4-installer-preview.md).
-
-**0.3.2 fixes base demolition and repeat joining.** Two complete build/dismantle
-cycles of a new standalone straight corridor passed on the two test phones.
-Signing-key replacement is checked for Android clone conflicts before preparation;
-the installer can re-register an existing game in the current profile.
-Update the installer over the existing app, keep its data, save and exit to the
-game menu, then **Prepare mod → Install prepared mod on both phones**. The native
-mod changed; protocol is now 27, and both players need matching mod builds.
-Do not manually uninstall the game to bypass a clone warning.
-[0.3.3 release notes](docs/releases/0.3.3-installer-preview.md).
-Diagnostics from 0.3.1 remain available: [report guide (Russian)](docs/DIAGNOSTICS.md).
+Update the installer over the existing app and keep its data and signing key.
+Save and exit to the game menu, then **Prepare mod → Install prepared mod on both
+phones**. Updating only the installer does not update the game mod. Protocol is
+**28**; matching builds are required. Automatic recovery of an unfinished transfer
+after a process crash is not implemented. Use a separate test world and ordinary
+resources first. [Locker contents](docs/LOCKER_CONTENTS.md) · [Diagnostics](docs/DIAGNOSTICS.md).
 
 **November 5 update:** the installer now has **“Запустить хостом” (Launch as host)**
 and **“Подключиться гостем” (Join as guest)**. A non-root phone can host a previously
@@ -33,8 +28,8 @@ downloaded world. Autoload after switching roles retains the former host's origi
 When upgrading from 0.2, update SN Multiplayer Installer over the existing app,
 save your game and return to its main menu, then run **Prepare mod → Install
 prepared mod** on both phones. Keep the installer's data: it holds your update key.
-The current release requires protocol **27** and matching builds on both phones;
-older public protocols **23** and **25** are incompatible.
+The current release requires protocol **28** and matching builds on both phones;
+older public protocols **23**, **25** and **27** are incompatible.
 [Host-selection history in 0.3](docs/releases/0.3.0-installer-preview.md).
 
 Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
@@ -70,7 +65,7 @@ and the local key needed for future updates. Full steps are in the
 
 Tested game version: **1.22.83315**, Android **arm64-v8a**. Both phones need matching game and mod builds. Other game versions and larger sessions are unverified.
 
-Choose **Launch as host** on one phone, load and save a world, then choose **Join as guest** on the other and leave it in the main menu. Save and return to the main menu on both phones before switching roles. Construction and demolition of foundations and supported base pieces attached to new or existing bases have passed live tests. Floor Locker construction, placement, empty storage and demolition from host to guest passed in 0.3.3. Version 0.3.4 also passed two guest-to-host build/remove cycles, removal of a saved locker after a full restart, and a locker in a new standalone room. Locker contents are not shared. Fish, complete ecosystem simulation, all held items and all animations are not synchronized. Remote flashlight on/off was tested; Seaglide placement still needs work. Internet matchmaking is not implemented.
+Choose **Launch as host** on one phone, load and save a world, then choose **Join as guest** on the other and leave it in the main menu. Save and return to the main menu on both phones before switching roles. Construction and demolition of foundations and supported base pieces attached to new or existing bases have passed live tests. Floor Locker construction, placement, empty storage and demolition from host to guest passed in 0.3.3. Version 0.3.4 also passed two guest-to-host build/remove cycles, removal of a saved locker after a full restart, and a locker in a new standalone room. Version 0.3.5 shares floor Locker contents, with tested resource transfers, battery charge and saved contents after restart. Automatic crash recovery and guest personal inventory persistence remain limitations; see the release notes. Fish, complete ecosystem simulation, all held items and all animations are not synchronized. Remote flashlight on/off was tested; Seaglide placement still needs work. Internet matchmaking is not implemented.
 
 See the Russian [play guide](docs/PLAYING.md), [compatibility matrix](docs/COMPATIBILITY.md), [build instructions](docs/BUILDING.md) and [demo roadmap](docs/ROADMAP.md).
 

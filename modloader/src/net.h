@@ -22,7 +22,7 @@ constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 27;  // explicit interior parent and local pose
+constexpr uint16_t kSessionProtocolVersion = 28;  // host-authorized locker contents
 #else
 constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
 #endif
@@ -198,6 +198,7 @@ SessionState net_session_state();
 SessionJoinStatus net_session_reason();
 void net_session_detail(char* out, size_t capacity);
 bool net_session_is_host();
+uint32_t net_session_host_id();
 
 // UI-facing session API. Join targets one exact host/session and is refused while this
 // device already has a loaded world. Leave is explicit; returning to the menu is not leave.
@@ -311,6 +312,7 @@ enum WorldEventKind : uint8_t {
     // last known snapshot for validation; the receiver runs SetState(false, false) on the
     // real class so the game's own deconstruction path rebuilds the base geometry.
     kWorldEventRemove = 5,
+    kWorldEventLockerContents = 6,
 };
 
 // build_flags bits for the build kinds. complete/isInside/forceUpright/rotatable/attached
@@ -385,6 +387,7 @@ struct WorldEvent {
 // already_applied says the local game already performed the action: the host picks items up
 // locally and must not have its own hook run a second time when the broadcast comes back.
 void net_post_world_event(const WorldEvent& event, bool already_applied);
+bool net_try_post_world_event(const WorldEvent& event);
 
 // Drains events received from peers. Call from the game thread - the actual Pickupable calls
 // have to happen on the thread that owns Unity.

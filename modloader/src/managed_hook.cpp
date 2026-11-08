@@ -17,6 +17,11 @@
 #include "launch_role_bridge.h"
 #include "net.h"
 #include "interior_build.h"
+#include "locker_contents.h"
+#include <deque>
+#include <dirent.h>
+#include <unistd.h>
+#include <errno.h>
 #include "held_light.h"
 #include "base_geometry_envelope.h"
 #include "base_geometry_cache.h"
@@ -3899,7 +3904,13 @@ PendingEvent g_pending_events[16];
 // only. Defines tick_build_sync/queue_remote_build and their tables; wired below from
 // pump_remote_events and hooked_player_update. Not full base replication - ConstructableBase
 // is refused before it can be instantiated (stage 3 of the live-world plan adds anchors).
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+bool contents_locker_busy(const char* id);
+#endif
 #include "build_sync.inc"
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+#include "locker_contents_sync.inc"
+#endif
 #include "avatar_environment.inc"
 
 // Runs on the game thread from Player.Update. The pump only queues; everything that touches
@@ -3910,6 +3921,9 @@ void pump_remote_events() {
     double now = monotonic_seconds();
 
     for (size_t i = 0; i < count; i++) {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        if(events[i].kind==kWorldEventLockerContents){contents_receive_frame(events[i]);continue;}
+#endif
         // Build kinds carry a full snapshot; the job table on the game thread owns the
         // apply, so they are queued straight away instead of going through pickup/drop
         // apply-retry. A job that cannot run yet (no prefab cache) is the draft's own
@@ -6885,6 +6899,9 @@ void hooked_player_update(void* self, void* method) {
     // Build sync v1: guests apply queued snapshots, the host scans and publishes its own.
     // Resolves its API lazily on the first call, so nothing extra happens at install time.
     tick_build_sync(g_local_player, local);
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    tick_locker_contents(local);
+#endif
 
     // API binding or slot files may not be ready when this newly installed hook
     // first runs. Retry until capture succeeds, then report once more five seconds

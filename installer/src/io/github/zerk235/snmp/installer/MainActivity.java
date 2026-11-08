@@ -38,7 +38,9 @@ public final class MainActivity extends Activity {
         scroll.addView(body); setContentView(scroll);
         text(body, "SUBNAUTICA", 14, Color.rgb(79, 216, 206));
         text(body, "Android Multiplayer", 28, Color.WHITE);
-        text(body, "Установка мода · 0.3.2-preview", 14, Color.LTGRAY);
+        String version="";
+        try { version=getPackageManager().getPackageInfo(getPackageName(),0).versionName; } catch(Exception ignored) { }
+        text(body, "Установка мода · " + version, 14, Color.LTGRAY);
         game = text(body, "", 16, Color.WHITE);
         recoverGame=button(body,"Вернуть игру в текущий профиль");
         recoverGame.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("Вернуть установленную копию игры?")

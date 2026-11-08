@@ -600,6 +600,7 @@ const char* event_kind_name(uint8_t kind) {
         case kWorldEventBuild: return "build";
         case kWorldEventProgress: return "progress";
         case kWorldEventRemove: return "remove";
+        case kWorldEventLockerContents: return "locker-contents";
         default: return "event";
     }
 }
@@ -609,7 +610,7 @@ const char* event_kind_name(uint8_t kind) {
 bool event_kind_known(uint8_t kind) {
     return kind == kWorldEventPickup || kind == kWorldEventDrop ||
            kind == kWorldEventBuild || kind == kWorldEventProgress ||
-           kind == kWorldEventRemove;
+           kind == kWorldEventRemove || kind == kWorldEventLockerContents;
 }
 
 struct EventSlot {
@@ -3264,6 +3265,15 @@ void net_post_world_event(const WorldEvent& event, bool already_applied) {
         return;
     }
     queue_local_event(event, already_applied);
+}
+
+bool net_try_post_world_event(const WorldEvent& event) {
+    return event.kind==kWorldEventLockerContents && queue_local_event(event,true);
+}
+uint32_t net_session_host_id() {
+    pthread_mutex_lock(&g_session.lock);
+    uint32_t id=g_session.host_id;
+    pthread_mutex_unlock(&g_session.lock);return id;
 }
 
 size_t net_copy_world_events(WorldEvent* out, size_t max) {
