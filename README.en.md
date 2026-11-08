@@ -4,7 +4,9 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-This is a public preview demo. The Android installer passed a clean game installation, Unity launch and a two-phone LAN session. Version 0.3 adds explicit host/guest selection and retains verified world backups and restore through separately authorized Shizuku. This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
+> **Public demo 0.3.5.** Play together on a local network: either phone can host, the guest automatically receives the host's saved world, and supported base pieces can be built and dismantled together. You can now exchange items through a regular floor Locker, with tested transfers in both directions, battery charge and locker contents after restart. Install directly on Android without a PC or root. Development continues; see the [tested features and limitations](docs/COMPATIBILITY.md). Use a separate world and backups for your first tests.
+
+This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Download and install
 
