@@ -1,4 +1,10 @@
-// Player marker: a real HUD ping, the same system that draws Seamoth/beacon markers
+#include "player_marker_policy.h"
+
+// Archived HUD experiments below are NOT production implementations. Creation and
+// heuristic cleanup requests are refused. Only explicit text control and a read-only
+// probe are reachable from the entrypoint; no Android-wide impossibility is established.
+// This fragment currently relies on unpublished local experiment helpers; see docs.
+// Original experiment goal: a real HUD ping, the same system that draws Seamoth/beacon markers
 // (PingInstance + PingManager -> uGUI_Pings). The game itself projects the icon, the
 // label and the distance; the mod only owns a bare transform that follows the peer.
 //
@@ -21,8 +27,7 @@ constexpr float kPingRange = 500.0f;
 struct PingMarker {
     bool resolved = false;
     bool failed = false;
-    bool armed = false;
-    bool probe = false;
+    player_marker::Control control;
     bool allow_create = false;
     bool probe_done = false;
     bool created = false;
@@ -137,57 +142,41 @@ bool ping_marker_resolve() {
 bool ping_marker_read_arm() {
     auto& m = g_ping_marker;
     double now = build_now();
-    if (now < m.next_arm_check) return m.armed;
+    if (now < m.next_arm_check) return m.control.text_enabled;
     m.next_arm_check = now + 2.0;
     FILE* file = fopen(kPingMarkerRequest, "rb");
-    if (!file) return m.armed;
+    if (!file) return m.control.text_enabled;
     char command[32]{};
-    size_t n = fread(command, 1, sizeof(command) - 1, file);
+    size_t n = fread(command, 1, sizeof(command), file);
+    bool oversized = fgetc(file) != EOF;
+    bool unreadable = ferror(file) != 0;
     fclose(file);
     unlink(kPingMarkerRequest);
-    if (n && !strncmp(command, "on", 2)) {
-        m.armed = true;
-        LOG_INFO("ping marker: armed by request file");
-    } else if (n && !strncmp(command, "probe", 5)) {
-        m.probe = true;
-        LOG_INFO("ping marker: probe requested (read-only inventory of PingInstance)");
-    } else if (n && !strncmp(command, "ping", 4)) {
-        // Refused on purpose. Two controlled attempts took the game down inside libunity
-        // about a second after the ping existed:
-        //   1) a GameObject built by the mod with PingInstance added to it (type Beacon);
-        //   2) PingInstance added to the peer's existing avatar clone (type Lifepod, a type
-        //      the loaded world already carries).
-        // In both cases creation and field writes succeeded and the crash came on the first
-        // uGUI_Pings update, so the fault is in the ping registration/rendering path itself.
-        // Re-enabling this needs static analysis of PingInstance.Initialize/uGUI_Pings, not
-        // another live attempt: each one costs both players a crash.
-        m.armed = true;
-        LOG_WARN("ping marker: ping creation refused (crashed the game twice); text hints only");
-    } else if (n && !strncmp(command, "nitrox", 6)) {
-        // Tried (Nitrox PlayerPing sequence: new GO + PingInstance Signal + minDist 5 + explicit
-        // Initialize). Initialize returned, but the process died next frame inside
-        // libil2cpp uGUI_Pings.UpdatePings (no libmain in backtrace). Not usable on this Android
-        // build. See docs/PING_MARKER_2026-11-09.md.
-        m.armed = true;
-        LOG_WARN("ping marker: nitrox HUD sequence refused (crashed in uGUI_Pings.UpdatePings on "
-                 "Android); see docs/PING_MARKER_2026-11-09.md; text hints only");
-    } else if (n && !strncmp(command, "cleanup", 7)) {
-        // Removed: the only HUD objects created were test artifacts; runtime beacons don't persist
-        // across sessions and player-placed beacons must never be destroyed by label heuristics.
-        LOG_INFO("ping marker: cleanup refused (unsafe/obsolete); see docs/PING_MARKER_2026-11-09.md");
-    } else if (n && !strncmp(command, "beacon", 6)) {
-        // Tried (spawn the game's Beacon prefab, tech 508). Prefab spawns and PingInstance
-        // registers (visible in PDA, PingManager has it), but HUD icon with distance never
-        // appeared reliably despite visible/range/SetVisible/NotifyVisible/NotifyRename; and
-        // find_prefab_source(508) is timing-dependent. Not a working player marker.
-        // See docs/PING_MARKER_2026-11-09.md.
-        m.armed = true;
-        LOG_WARN("ping marker: beacon prefab HUD marker refused (no reliable HUD icon, prefab "
-                 "resolution timing-dependent); see docs/PING_MARKER_2026-11-09.md; text hints only");
-    } else {
-        LOG_INFO("ping marker: request ignored (%zu bytes)", n);
+    const auto action = oversized || unreadable ? player_marker::Command::Ignore
+        : player_marker::parse(command, static_cast<unsigned>(n));
+    m.control.apply(action);
+    switch(action) {
+    case player_marker::Command::On:
+        m.next_report=0;
+        LOG_INFO("player marker: text hints enabled");
+        break;
+    case player_marker::Command::Off:
+        LOG_INFO("player marker: text hints and pending probe disabled");
+        break;
+    case player_marker::Command::Probe:
+        m.probe_done=false;
+        LOG_INFO("ping marker: read-only probe requested; text state unchanged");
+        break;
+    case player_marker::Command::Refused:
+        // Archive only: failed creation/cleanup paths must never be re-enabled by a file.
+        LOG_WARN("ping marker: unsafe HUD/cleanup command refused; see PING_MARKER_2026-11-09.md");
+        break;
+    default:
+        LOG_INFO("ping marker: request ignored (%zu bytes, oversized=%u)",n,unsigned(oversized));
+        break;
     }
-    return m.armed;
+
+    return m.control.text_enabled;
 }
 
 bool ping_marker_create() {
@@ -689,7 +678,7 @@ void tick_player_marker(const LocalState& local) {
     // The arm file is read before any world/role gate: an isolated test must be able to run
     // in solo, where no peer exists and the role note was never delivered.
     ping_marker_read_arm();
-    if (!local.valid) return;
+    if (!local.valid || !m.control.active()) return;
     const bool role_ready = g_role_known && contents_world_ready() && world_operations_ready();
     if (!role_ready) {
         // Isolated paths: a live world is enough. The normal path still waits for the full
@@ -699,7 +688,11 @@ void tick_player_marker(const LocalState& local) {
             m.allow_create_nitrox || m.allow_create_beacon || m.cleanup_requested;
         if (!solo_allowed || g_world_live_since <= 0.0) return;
     }
-    if (m.probe && !m.probe_done) ping_marker_probe();
+    if (m.control.probe_pending && !m.probe_done) {
+        ping_marker_probe();
+        if(m.probe_done)m.control.probe_pending=false;
+    }
+    if(!m.control.text_enabled)return;
     if (m.cleanup_requested) ping_marker_cleanup();
     PeerState peers[kMaxPeers];
     size_t count = net_copy_peers(peers, kMaxPeers);
@@ -716,7 +709,7 @@ void tick_player_marker(const LocalState& local) {
         // Isolated test path: neither the Nitrox sequence nor the beacon needs a peer, so a
         // marker can be created at the local position to check it on a single phone.
         Vector3 self{local.x, local.y, local.z + 3.0f};
-        if (m.armed && !m.created) {
+        if (m.control.text_enabled && !m.created) {
             if (m.allow_create_nitrox) {
                 if (ping_marker_create_nitrox() && m.transform)
                     g_set_position.call(m.transform, self, g_set_position.method);
@@ -727,7 +720,7 @@ void tick_player_marker(const LocalState& local) {
         if (m.created) ++m.updates;
         return;
     }
-    if (m.armed && !m.created) {
+    if (m.control.text_enabled && !m.created) {
         if (m.allow_create_nitrox) {
             if (!ping_marker_create_nitrox()) return;
             m.peer = seen->id;
