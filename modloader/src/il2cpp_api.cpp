@@ -16,7 +16,9 @@ struct Il2CppString* (*il2cpp_string_new)(const char*) = nullptr;
 struct Il2CppThread* (*il2cpp_thread_attach)(struct Il2CppDomain*) = nullptr;
 struct Il2CppObject* (*il2cpp_object_new)(struct Il2CppClass*) = nullptr;
 struct Il2CppArray* (*il2cpp_array_new)(struct Il2CppClass*, unsigned int) = nullptr;
-unsigned int (*il2cpp_gchandle_new)(struct Il2CppObject*, bool) = nullptr;
+Il2CppGCHandle (*il2cpp_gchandle_new)(struct Il2CppObject*, bool) = nullptr;
+struct Il2CppObject* (*il2cpp_gchandle_get_target)(Il2CppGCHandle) = nullptr;
+void (*il2cpp_gchandle_free)(Il2CppGCHandle) = nullptr;
 struct Il2CppClass* (*il2cpp_object_get_class)(struct Il2CppObject*) = nullptr;
 int (*il2cpp_field_get_offset)(void*) = nullptr;
 struct Il2CppFieldInfo* (*il2cpp_class_get_fields)(struct Il2CppClass*, void**) = nullptr;
@@ -69,6 +71,8 @@ bool resolve_il2cpp_api() {
     RESOLVE(il2cpp_object_new, "il2cpp_object_new")
     RESOLVE(il2cpp_array_new, "il2cpp_array_new")
     RESOLVE(il2cpp_gchandle_new, "il2cpp_gchandle_new")
+    RESOLVE(il2cpp_gchandle_get_target, "il2cpp_gchandle_get_target")
+    RESOLVE(il2cpp_gchandle_free, "il2cpp_gchandle_free")
     RESOLVE(il2cpp_object_get_class, "il2cpp_object_get_class")
     RESOLVE(il2cpp_field_get_offset, "il2cpp_field_get_offset")
     RESOLVE(il2cpp_class_get_fields, "il2cpp_class_get_fields")

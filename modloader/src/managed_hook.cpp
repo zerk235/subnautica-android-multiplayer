@@ -18,6 +18,8 @@
 #include "net.h"
 #include "interior_build.h"
 #include "locker_contents.h"
+#include "managed_root.h"
+#include "runtime_load_guard.h"
 #include <deque>
 #include <dirent.h>
 #include <unistd.h>
@@ -37,6 +39,7 @@ bool g_local_is_host = false;
 bool g_role_known = false;
 void net_note_role_from_peer(uint32_t peer_id);
 void net_note_session_role(bool is_host, uint32_t host_id);
+bool loading_screen_blocks_world();
 
 namespace {
 
@@ -3059,6 +3062,9 @@ void update_peer_avatars(void* player_self) {
 
     for (size_t i = 0; i < count; i++) {
         const PeerState& peer = peers[i];
+        // Discovery/HELLO is not a usable player pose. A loading guest publishes
+        // no state until the local world guard is ready.
+        if(!peer.seq_valid)continue;
         RemoteAvatar* avatar = find_avatar(peer.id);
         if (!avatar) {
             spawn_avatar(peer);
@@ -3510,17 +3516,20 @@ Entry<GetPrefabAsyncFn> g_prefab_get_async;
 // Pending prefab-database requests, one per missing TechType. The load runs in the background;
 // MoveNext drives it and TryGetPrefab picks the result up, both polled from the avatar update
 // without log spam so the prop pops in the moment the bundle arrives. The finished prefab stays
-// cached in the slot: Boehm never moves managed objects and the database keeps its own
-// reference (nothing is Released), so the pointer stays valid and re-equips answer instantly.
+// cached through strong runtime GC handles. A raw pointer in this native array
+// does not keep the managed request, its filename or its result alive.
 struct PrefabRequest {
     uint32_t tech = 0;
-    void* request = nullptr;
-    void* prefab = nullptr;
+    ManagedRoot request;
+    ManagedRoot prefab;
     Entry<TryGetPrefabFn> try_get;
     Entry<MoveNextFn> move_next;
+    bool iterator_done = false;
+    unsigned long last_step = 0;
 };
-constexpr size_t kMaxPrefabRequests = 4;
+constexpr size_t kMaxPrefabRequests = 16;
 PrefabRequest g_prefab_requests[kMaxPrefabRequests];
+void reset_prefab_requests();
 
 // Set while a remote event is being applied. A counter rather than a flag because a pickup
 // applied remotely can drop something else locally in the same frame, and a plain bool would be
@@ -3725,6 +3734,32 @@ bool g_daynight_resolved = false;
 // kReidSettleSeconds before it runs.
 constexpr double kReidSettleSeconds = 10.0;
 double g_world_live_since = 0.0;
+RuntimeLoadGuard g_runtime_load_guard;
+bool validate_gc_handle_api() {
+    static bool attempted=false,ready=false;
+    if(attempted)return ready;
+    attempted=true;
+    static_assert(sizeof(Il2CppGCHandle)==sizeof(void*));
+    void* marker=il2cpp_string_new("snmp-gchandle-check");
+    const Il2CppGCHandle handle=marker ? il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(marker),false) : 0;
+    ready=handle&&il2cpp_gchandle_get_target(handle)==marker;
+    if(handle)il2cpp_gchandle_free(handle);
+    LOG_INFO("managed roots: ABI check ready=%u handle_bits=%u handle=%llx create/get/free complete",
+             unsigned(ready),unsigned(sizeof(handle)*8),static_cast<unsigned long long>(handle));
+    return ready;
+}
+bool world_operations_ready() {
+    void* manager=g_slm_get_main ? g_slm_get_main.call(nullptr,g_slm_get_main.method) : nullptr;
+    const bool available=manager&&g_slm_is_loading;
+    // SaveLoadManager can report false while uGUI_SceneLoading is still active.
+    const bool loading=!available||g_slm_is_loading.call(manager,g_slm_is_loading.method)||
+        loading_screen_blocks_world()||!validate_gc_handle_api();
+    const bool before=g_runtime_load_guard.ready;
+    const bool ready=g_runtime_load_guard.update(g_world_live_since>0,available,loading,
+        g_world_context_generation,monotonic_seconds());
+    if(before!=ready)LOG_INFO("runtime world: %s context=%u loading=%u",ready?"ready":"deferred",g_world_context_generation,unsigned(loading));
+    return ready;
+}
 
 // Resolved lazily on the first Player.Update: il2cpp_class_from_name only sees types the
 // runtime has materialised, and DayNightCycle is not touched until a world is loading, so
@@ -3791,6 +3826,7 @@ void time_sync_tick() {
         }
     } else {
         if (g_world_live_since > 0.0) {
+            reset_prefab_requests();
             net_session_set_world_active(false);
             bool was_host = g_local_is_host;
             if(was_host) {
@@ -3910,6 +3946,9 @@ bool contents_locker_busy(const char* id);
 #include "build_sync.inc"
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
 #include "locker_contents_sync.inc"
+#include "creature_probe.inc"
+#include "creature_motion_probe.inc"
+#include "player_marker.inc"
 #endif
 #include "avatar_environment.inc"
 
@@ -5673,7 +5712,7 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
             uint32_t tech = vehicle_tech_for_class(slot->classId);
             PrefabRequest* preq =
                 tech ? prefab_slot_for(tech, false) : nullptr;
-            if (preq && preq->request && !preq->prefab) {
+            if (preq && preq->request.get() && !preq->prefab.get()) {
                 // A prefab load fired earlier is still in flight: poll it every frame
                 // (cheap slot lookup, no scene scan). The copy pops in on arrival.
                 bool settled = spawn_driven_from_prefab(slot);
@@ -5895,61 +5934,100 @@ void read_equipment(uint32_t* suit, uint32_t* fins, uint32_t* head) {
 // touched - only cloned from, exactly like a dormant world copy.
 // Binds a fresh database request to its concrete class. TryGetPrefab/MoveNext are looked up
 // on LoadedPrefabRequest or LoadingPrefabRequest, whichever the request actually is.
-void bind_prefab_request(PrefabRequest* slot, void* request) {
-    slot->request = request;
-    slot->prefab = nullptr;
+ManagedRoot::Handle prefab_root_create(void* object) {
+    return il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(object),false);
+}
+void* prefab_root_get(ManagedRoot::Handle handle) { return il2cpp_gchandle_get_target(handle); }
+bool prefab_retain(ManagedRoot& root,void* object) {
+    return root.retain(object,prefab_root_create,prefab_root_get,il2cpp_gchandle_free);
+}
+void clear_prefab_request(PrefabRequest* slot) {
+    slot->request.clear();slot->prefab.clear();slot->tech=0;
+    slot->try_get={};slot->move_next={};slot->iterator_done=false;slot->last_step=0;
+}
+void reset_prefab_requests() {
+    for(auto& slot:g_prefab_requests)clear_prefab_request(&slot);
+    LOG_INFO("prefab requests: cleared GC roots for world transition");
+}
+bool bind_prefab_request(PrefabRequest* slot, void* request) {
+    if(!prefab_retain(slot->request,request))return false;
+    slot->prefab.clear();
     slot->try_get = Entry<TryGetPrefabFn>();
     slot->move_next = Entry<MoveNextFn>();
+    slot->iterator_done=false;slot->last_step=0;
     struct Il2CppClass* klass =
         (il2cpp_object_get_class && request)
             ? il2cpp_object_get_class(reinterpret_cast<struct Il2CppObject*>(request))
             : nullptr;
     if (klass) {
+        const char* name=il2cpp_class_get_name(klass);
+        if(!name||(strcmp(name,"LoadingPrefabRequest")&&strcmp(name,"LoadedPrefabRequest"))) {
+            LOG_WARN("prefab request: refused unexpected type %s",name?name:"?");
+            clear_prefab_request(slot);return false;
+        }
         slot->try_get.bind(find_method(klass, "TryGetPrefab", 1));
         slot->move_next.bind(find_method(klass, "MoveNext", 0));
     }
+    if(!slot->try_get||!slot->move_next){clear_prefab_request(slot);return false;}
+    LOG_INFO("prefab request: rooted tech=%u type=%s",slot->tech,il2cpp_class_get_name(klass));
+    return true;
 }
 
 PrefabRequest* prefab_slot_for(uint32_t tech, bool create) {
     PrefabRequest* free_slot = nullptr;
+    PrefabRequest* completed = nullptr;
     for (size_t i = 0; i < kMaxPrefabRequests; i++) {
         if (g_prefab_requests[i].tech == tech) return &g_prefab_requests[i];
-        if (!free_slot && !g_prefab_requests[i].request) free_slot = &g_prefab_requests[i];
+        if (!free_slot && !g_prefab_requests[i].tech) free_slot = &g_prefab_requests[i];
+        if (!completed && g_prefab_requests[i].prefab.get()) completed=&g_prefab_requests[i];
     }
     if (!create) return nullptr;
-    if (!free_slot) free_slot = &g_prefab_requests[0];  // bounded: reuse the first slot
+    // Never discard an in-flight request merely because another TechType arrived.
+    if (!free_slot) free_slot=completed;
+    if (!free_slot) return nullptr;
+    clear_prefab_request(free_slot);
     free_slot->tech = tech;
-    free_slot->request = nullptr;
-    free_slot->prefab = nullptr;
     return free_slot;
 }
 
 // Polls a pending database request: drives the load, returns the prefab the moment it is
 // ready (and caches it in the slot for instant re-equips).
 void* poll_prefab_request(uint32_t tech) {
+    if(!world_operations_ready())return nullptr;
     PrefabRequest* slot = prefab_slot_for(tech, false);
     if (!slot) return nullptr;
-    if (slot->prefab) return slot->prefab;
-    if (!slot->request) return nullptr;
-    if (slot->move_next) slot->move_next.call(slot->request, slot->move_next.method);
+    if (void* cached=slot->prefab.get())return cached;
+    void* request=slot->request.get();
+    if (!request) return nullptr;
+    // Multiple consumers may ask for the same prefab in one Player.Update.
+    // Advance the iterator once per frame, and never after it returned false.
+    const auto frame=static_cast<unsigned long>(g_update_calls);
+    if (!slot->iterator_done&&slot->move_next&&slot->last_step!=frame) {
+        slot->last_step=frame;
+        slot->iterator_done=!slot->move_next.call(request,slot->move_next.method);
+    }
     void* prefab = nullptr;
     if (slot->try_get &&
-        slot->try_get.call(slot->request, &prefab, slot->try_get.method) && prefab) {
-        slot->prefab = prefab;
+        slot->try_get.call(request, &prefab, slot->try_get.method) && prefab) {
+        if(!prefab_retain(slot->prefab,prefab))return nullptr;
         LOG_INFO("held prop: prefab for tech %u arrived (%p)", tech, prefab);
         return prefab;
+    }
+    if(slot->iterator_done) {
+        LOG_WARN("prefab request: completed without prefab tech=%u; retry after next lookup",tech);
+        clear_prefab_request(slot);
     }
     return nullptr;
 }
 
 void* find_prefab_source(uint32_t tech) {
-    if (!tech) return nullptr;
+    if (!tech||!world_operations_ready()) return nullptr;
     // A load already in flight (or finished): take the prefab when ready.
     void* prefab = poll_prefab_request(tech);
     if (prefab) return prefab;
     if (!g_craft_get_class_id || !g_prefab_get_async) return nullptr;
     PrefabRequest* slot = prefab_slot_for(tech, true);
-    if (!slot || slot->request) return nullptr;  // loading already, wait for the poll
+    if (!slot || slot->request.get()) return nullptr;  // loading already, wait for the poll
     void* class_id = g_craft_get_class_id.call(tech, g_craft_get_class_id.method);
     if (!class_id) return nullptr;
     // Synchronous scene-prefab query first: free when it hits.
@@ -5962,7 +6040,7 @@ void* find_prefab_source(uint32_t tech) {
     }
     void* request = g_prefab_get_async.call(class_id, g_prefab_get_async.method);
     if (!request) return nullptr;
-    bind_prefab_request(slot, request);
+    if(!bind_prefab_request(slot, request))return nullptr;
     char name[64] = {0};
     read_managed_name(class_id, name, sizeof(name));
     LOG_INFO("held prop: prefab request for tech %u ('%s') fired, polling", tech, name);
@@ -6861,8 +6939,10 @@ void hooked_player_update(void* self, void* method) {
     // Animator-set diagnostic: which local Animator actually hears tool use (body vs viewmodel).
     diag_anim_ensure();
     diag_anim_poll();
-    net_publish(local);
-    update_peer_avatars(self);
+    LocalState published=local;
+    if(!world_operations_ready())published.valid=false;
+    net_publish(published);
+    if(published.valid)update_peer_avatars(self);
 
     // Remote pickups and drops, applied on this thread because Pickupable belongs to Unity.
     pump_remote_events();
@@ -6901,6 +6981,8 @@ void hooked_player_update(void* self, void* method) {
     tick_build_sync(g_local_player, local);
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
     tick_locker_contents(local);
+    if(!tick_creature_motion_probe(local))tick_creature_probe(local);
+    tick_player_marker(local);
 #endif
 
     // API binding or slot files may not be ready when this newly installed hook
@@ -7010,17 +7092,12 @@ void* autoload_field_on(struct Il2CppClass* klass, const char* name, int expecte
     return nullptr;
 }
 
-void loader_diag_tick() {
-    if (g_autoload_started_at <= 0.0) return;
-    double now = monotonic_seconds();
-    if (now - g_autoload_started_at > 240.0) {
-        LOG_WARN("autoload: completion unconfirmed for exact slot=%s; no forced UI changes",g_autoload_slot);
-        g_autoload_started_at=0.0;return;
-    }
-    if (now < g_loader_diag_next) return;
-    g_loader_diag_next = now + 1.0;
-
-    if (!g_loader_diag_attempted) {
+bool resolve_loading_screen_api() {
+    if(g_loader_diag_ready)return true;
+    static double next_attempt=0;
+    if(monotonic_seconds()<next_attempt)return false;
+    next_attempt=monotonic_seconds()+1;
+    {
         g_loader_diag_attempted = true;
         g_ugui_class = find_class_in_domain("", "uGUI");
         g_scene_loading_class = find_class_in_domain("", "uGUI_SceneLoading");
@@ -7039,12 +7116,38 @@ void loader_diag_tick() {
             g_gameobject_get_active_self.bind(find_method(game_object, "get_activeSelf", 0));
         }
         g_loader_diag_ready = g_ugui_get_main && g_ugui_loading_field &&
-                              g_loading_is_loading_field && g_loading_progress_field;
+                              g_loading_is_loading_field && g_loading_progress_field &&
+                              g_gameobject_get_active_self;
         LOG_INFO("loader-diag: api ready=%d (uGUI=%p sceneLoading=%p activeSelf=%d)",
                  g_loader_diag_ready ? 1 : 0, (void*)g_ugui_class,
                  (void*)g_scene_loading_class, g_gameobject_get_active_self ? 1 : 0);
     }
-    if (!g_loader_diag_ready) return;
+    return g_loader_diag_ready&&g_gameobject_get_active_self;
+}
+
+bool loading_screen_blocks_world() {
+    if(!resolve_loading_screen_api())return true;
+    void* ugui=g_ugui_get_main.call(g_ugui_get_main.method);
+    if(!ugui)return true;
+    void* loading=nullptr;
+    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(ugui),g_ugui_loading_field,&loading);
+    if(!loading)return true;
+    bool busy=true;
+    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(loading),g_loading_is_loading_field,&busy);
+    void* go=g_get_game_object.call(loading,g_get_game_object.method);
+    return busy||!go||g_gameobject_get_active_self.call(go,g_gameobject_get_active_self.method);
+}
+
+void loader_diag_tick() {
+    if (g_autoload_started_at <= 0.0) return;
+    double now = monotonic_seconds();
+    if (now - g_autoload_started_at > 240.0) {
+        LOG_WARN("autoload: completion unconfirmed for exact slot=%s; no forced UI changes",g_autoload_slot);
+        g_autoload_started_at=0.0;return;
+    }
+    if (now < g_loader_diag_next) return;
+    g_loader_diag_next = now + 1.0;
+    if (!resolve_loading_screen_api()) return;
 
     void* ugui = g_ugui_get_main.call(g_ugui_get_main.method);
     if (!ugui) {
@@ -7116,6 +7219,10 @@ void world_context_tick(void* manager) {
     }
     const bool at_menu=menu && !loading && !starting && !daynight_instance();
     const bool transition=world_context_transition(&g_world_context_watch,slot,loading);
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    if(transition||at_menu||loading)hud_marker_destroy("world transition/menu");
+#endif
+    if(transition)reset_prefab_requests();
     if((transition || at_menu) && net_session_invalidate_host_world()) {
         net_offer_world(nullptr,nullptr);world_release();
         g_local_is_host=false;g_role_known=false;g_world_live_since=0;

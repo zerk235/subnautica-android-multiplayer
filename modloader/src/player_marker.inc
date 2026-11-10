@@ -160,8 +160,11 @@ bool ping_marker_read_arm() {
         m.next_report=0;
         LOG_INFO("player marker: text hints enabled");
         break;
+    case player_marker::Command::Hud:
+        LOG_INFO("peer HUD: requested; text hints disabled");
+        break;
     case player_marker::Command::Off:
-        LOG_INFO("player marker: text hints and pending probe disabled");
+        LOG_INFO("player marker: text hints and pending probe disabled; HUD disabled");
         break;
     case player_marker::Command::Probe:
         m.probe_done=false;
@@ -673,13 +676,16 @@ void ping_marker_cleanup() {
     }
 }
 
+#include "player_hud_marker.inc"
+
 void tick_player_marker(const LocalState& local) {
     auto& m = g_ping_marker;
     // The arm file is read before any world/role gate: an isolated test must be able to run
     // in solo, where no peer exists and the role note was never delivered.
     ping_marker_read_arm();
+    const bool role_ready = local.valid && g_role_known && contents_world_ready() && world_operations_ready();
+    tick_player_hud_marker(local,m.control.hud_enabled&&role_ready);
     if (!local.valid || !m.control.active()) return;
-    const bool role_ready = g_role_known && contents_world_ready() && world_operations_ready();
     if (!role_ready) {
         // Isolated paths: a live world is enough. The normal path still waits for the full
         // session/world gate. Cleanup must work in solo too, otherwise a test world cannot

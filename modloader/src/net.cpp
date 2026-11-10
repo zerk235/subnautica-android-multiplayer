@@ -15,6 +15,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <deque>
 
 #include "log.h"
 #include "world.h"
@@ -68,6 +69,7 @@ enum PacketType : uint8_t {
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
     kPacketGeometryFragment = 17,
     kPacketGeometryAck = 18,
+    kPacketCreatureProbe = 20,
 #endif
 };
 
@@ -1600,6 +1602,7 @@ bool authorize_world_sender(uint32_t id, const struct sockaddr_in& addr, bool fr
 
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 #include "base_geometry_channel.inc"
+#include "creature_motion_channel.inc"
 #endif
 
 void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr_in& addr,
@@ -2415,6 +2418,11 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
     }
 
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
+    if (header.type == kPacketCreatureProbe) {
+        pthread_mutex_unlock(&g_peers_lock);
+        creature_motion_handle_packet(data,size,addr);
+        pthread_mutex_lock(&g_peers_lock);
+    }
     if (header.type == kPacketGeometryFragment || header.type == kPacketGeometryAck) {
         pthread_mutex_unlock(&g_peers_lock);
         geometry_handle_packet(data, size, addr, now);
@@ -3168,6 +3176,7 @@ void* pump_main(void* unused) {
         service_world_events(now);
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
         geometry_service(now);
+        creature_motion_service();
 #endif
 
         if (now >= next_report) {
@@ -3231,6 +3240,8 @@ void* pump_main(void* unused) {
 bool net_geometry_enqueue(const base_geometry::GhostEnvelope& envelope) {
     return geometry_enqueue(envelope);
 }
+bool net_creature_probe_send(const creature_motion::Message& message) {return creature_motion_enqueue(message);}
+bool net_creature_probe_take(creature_motion::Message* message) {return creature_motion_take(message);}
 bool net_geometry_take(uint32_t* origin, base_geometry::GhostEnvelope* out) {
     return geometry_take(origin, out);
 }

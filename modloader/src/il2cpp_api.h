@@ -27,7 +27,11 @@ extern struct Il2CppString* (*il2cpp_string_new)(const char* str);
 extern struct Il2CppThread* (*il2cpp_thread_attach)(struct Il2CppDomain* domain);
 extern struct Il2CppObject* (*il2cpp_object_new)(struct Il2CppClass* klass);
 extern struct Il2CppArray* (*il2cpp_array_new)(struct Il2CppClass* klass, unsigned int length);
-extern unsigned int (*il2cpp_gchandle_new)(struct Il2CppObject* obj, bool pinned);
+// Unity 6 on this ARM64 game uses pointer-sized handles, not legacy uint32 indices.
+using Il2CppGCHandle = std::uintptr_t;
+extern Il2CppGCHandle (*il2cpp_gchandle_new)(struct Il2CppObject* obj, bool pinned);
+extern struct Il2CppObject* (*il2cpp_gchandle_get_target)(Il2CppGCHandle handle);
+extern void (*il2cpp_gchandle_free)(Il2CppGCHandle handle);
 extern struct Il2CppClass* (*il2cpp_object_get_class)(struct Il2CppObject* obj);
 extern int (*il2cpp_field_get_offset)(void* field);
 extern struct Il2CppFieldInfo* (*il2cpp_class_get_fields)(struct Il2CppClass* klass, void** iter);

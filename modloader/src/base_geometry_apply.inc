@@ -281,7 +281,7 @@ bool build_apply_completed_corridor_inner(void* prefab, void* target, const Worl
     }
     if (ok) {
         void* id = il2cpp_string_new(e.object_id);
-        unsigned int root = id ? il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(id), true) : 0;
+        Il2CppGCHandle root = id ? il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(id), true) : 0;
         ok = build_keep_id_root(root);
         if (ok) g_uid_set_id.call(uid, id, g_uid_set_id.method);
     }

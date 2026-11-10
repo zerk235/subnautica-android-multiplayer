@@ -9,6 +9,7 @@
 #include "held_rotation.h"
 #include "held_pose.h"
 #include "session_launch_role.h"
+#include "creature_motion.h"
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 #include "base_geometry_envelope.h"
 #endif
@@ -22,7 +23,7 @@ constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 28;  // host-authorized locker contents
+constexpr uint16_t kSessionProtocolVersion = 29;  // finite opt-in single-creature experiment
 #else
 constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
 #endif
@@ -149,6 +150,8 @@ uint32_t net_local_id();
 bool net_geometry_enqueue(const base_geometry::GhostEnvelope& envelope);
 bool net_geometry_take(uint32_t* origin, base_geometry::GhostEnvelope* out);
 bool net_geometry_session(uint8_t out_id[16], uint32_t* epoch);
+bool net_creature_probe_send(const creature_motion::Message& message);
+bool net_creature_probe_take(creature_motion::Message* message);
 #endif
 
 enum SessionState {

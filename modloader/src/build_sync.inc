@@ -63,6 +63,7 @@ struct BuildJob {
     WorldEvent state;
     double deadline;
     double next_try;
+    PausedWorkDeadline load_pause;
 };
 
 BuildKnown g_build_known[kBuildKnownLimit]{};
@@ -110,15 +111,15 @@ Entry<BuildStaticObjectFn> g_build_ghost;
 using BuildTechFn = int32_t (*)(void*);
 Entry<BuildTechFn> g_build_last_tech;
 Entry<BuildAliveFn> g_build_alive;
-// il2cpp_gchandle_free crashed inside libil2cpp on this game build immediately after
-// UniqueIdentifier.set_Id. Keep these short ID strings pinned until process exit, matching
-// the already-proven inventory/avatar string path, and bound the total to the known table.
-uint32_t g_build_id_roots[kBuildKnownLimit]{};
+// Historical free crashes used a truncated 32-bit handle. Keep the existing bounded
+// process-lifetime pinning policy for ID strings; correcting the ABI does not change
+// ownership of already assigned game fields.
+Il2CppGCHandle g_build_id_roots[kBuildKnownLimit]{};
 size_t g_build_id_root_count = 0;
 
 // The assigned managed field normally roots the string, but retain the pinned handle as
-// well: freeing it here crashed in il2cpp_gchandle_free on the supported game build.
-bool build_keep_id_root(unsigned int root) {
+// well, preserving the existing process-lifetime ownership policy.
+bool build_keep_id_root(Il2CppGCHandle root) {
     if (!root || g_build_id_root_count >= kBuildKnownLimit) return false;
     g_build_id_roots[g_build_id_root_count++] = root;
     return true;
@@ -679,6 +680,11 @@ void build_finish_job(BuildJob& j) {
     j = BuildJob{};
 }
 
+void build_pause_for_loading() {
+    const double now=build_now();
+    for(auto& job:g_build_jobs)if(job.used)job.load_pause.pause(now);
+}
+
 void* build_find(const WorldEvent& e) {
     void* list = g_find_objects_all.call(g_build_type, true, g_find_objects_all.method);
     if (!list) return nullptr;
@@ -850,7 +856,7 @@ void build_spawn(void* prefab, const WorldEvent& e) {
     if (ok && anchored) build_write_anchors(c, e);
     if (ok) {
         void* text = il2cpp_string_new(e.object_id);
-        unsigned int root =
+        Il2CppGCHandle root =
             text ? il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(text), true) : 0;
         ok = build_keep_id_root(root);
         if (ok) {
@@ -859,7 +865,7 @@ void build_spawn(void* prefab, const WorldEvent& e) {
             LOG_INFO("build: stage=uid-before id=%s method=%p", e.object_id,
                      (void*)g_uid_set_id.method);
             g_uid_set_id.call(uid, text, g_uid_set_id.method);
-            LOG_INFO("build: stage=uid-after id=%s pinned_root=%u", e.object_id, root);
+            LOG_INFO("build: stage=uid-after id=%s pinned_root=%llx", e.object_id, static_cast<unsigned long long>(root));
             Vector3 p{e.x, e.y, e.z};
             Quaternion q{e.qx, e.qy, e.qz, e.qw};
             LOG_INFO("build: stage=pose-before id=%s transform=%p", e.object_id, tr);
@@ -1003,10 +1009,12 @@ void build_pump_jobs() {
     // the host's (autosave), but a guest's placed piece is applied on the host too, so the
     // next host autosave writes it into the authoritative save.
     if (!g_role_known) return;
+    if(!world_operations_ready()){build_pause_for_loading();return;}
     double now = build_now();
     for (size_t i = 0; i < sizeof(g_build_jobs) / sizeof(BuildJob); i++) {
         BuildJob& j = g_build_jobs[i];
         if (!j.used) continue;
+        j.load_pause.resume(now,&j.deadline);
         if (now < j.next_try) continue;
         if (now > j.deadline) {
             LOG_WARN("build: job expired id=%s tech=%d, dropped after %.0f s of waiting",
@@ -1197,6 +1205,9 @@ void tick_build_sync(void* /*player*/, const LocalState& local) {
         g_build_baseline = false;
         return;
     }
+    // Player.Update begins before SaveLoadManager finishes restoring the scene.
+    // Keep received snapshots queued, but do not scan, load prefabs or apply them.
+    if(!world_operations_ready()){build_pause_for_loading();g_build_baseline=false;return;}
     if (!g_build_attempted) resolve_build_api();
     if (!g_build_enabled) return;
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)

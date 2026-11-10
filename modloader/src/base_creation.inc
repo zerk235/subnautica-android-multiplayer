@@ -27,7 +27,7 @@ bool build_capture_first_base(void* component,const base_geometry::GhostEnvelope
     il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(ghost),g_ghost_capture.target,&target);
     if (build_live(target) || !build_piece_root_world(base,geometry.geometry,&out->root_world) ||
         g_build_id_root_count>=kBuildKnownLimit) return false;
-    // This runtime's gchandle_free is unsafe (see build_sync.inc). Keep a bounded
+    // Preserve the existing process-lifetime ownership policy (see build_sync.inc). Keep a bounded
     // root for the destroyed model's managed wrapper, just as for assigned IDs.
     if (!build_keep_id_root(il2cpp_gchandle_new(reinterpret_cast<Il2CppObject*>(ghost),true))) return false;
     out->ghost=ghost;

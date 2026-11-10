@@ -243,6 +243,28 @@ int main() {
     packets=read_packets(c);activate(c,a);feed(packets,a);
     assert(net_copy_world_events(decoded,4)==1&&decoded[0].kind==kWorldEventLockerContents);
     assert(decoded[0].reserved16==length&&!memcmp(reinterpret_cast<uint8_t*>(decoded)+start,reinterpret_cast<uint8_t*>(&contents)+start,length));
+    // Single-creature channel uses real UDP and the same session/endpoint gate.
+    namespace cm=creature_motion;
+    g_creature_motion_tx.clear();g_creature_motion_rx.clear();
+    cm::Message request;request.host=request.target=1;request.sender=3;
+    request.epoch=g_session.epoch;memcpy(request.session.data(),g_session.session_id,16);
+    request.nonce=0x1234567812345678ULL;request.fish[0]=4;request.prefab[0]=5;
+    read_packets(a);read_packets(c);
+    activate(c,a);assert(net_creature_probe_send(request));creature_motion_service();
+    packets=read_packets(a);assert(packets.size()==1&&packets[0][4]==kPacketCreatureProbe);
+    activate(a,c);feed(packets,c);cm::Message received;
+    assert(net_creature_probe_take(&received)&&received.nonce==request.nonce&&received.fish==request.fish);
+    assert(!net_creature_probe_take(&received));
+    cm::Message pose=request;pose.kind=cm::Pose;pose.sender=1;pose.target=3;pose.sequence=1;pose.position={12,3,-4};
+    assert(net_creature_probe_send(pose));pose.sequence=2;pose.position[0]=13;assert(net_creature_probe_send(pose));
+    creature_motion_service();packets=read_packets(c);assert(packets.size()==1); // Pose mailbox coalesces.
+    activate(c,a);feed(packets,a);
+    assert(net_creature_probe_take(&received)&&received.sequence==2&&received.position[0]==13);
+    feed(packets,b);assert(!net_creature_probe_take(&received)); // Wrong endpoint.
+    g_remote[0].flags=0;feed(packets,a);assert(!net_creature_probe_take(&received));
+    activate(c,a);++g_session.epoch;feed(packets,a);assert(!net_creature_probe_take(&received));
+    // Old outbound session cannot be enqueued after a context transition.
+    assert(!net_creature_probe_send(request));
     close(a.socket); close(b.socket); close(c.socket);
     puts("PASS: real UDP ordered first packet, lost ACK, 31s outage, offline actions, endpoint/slot reuse, new recipient baseline, forged ACK gates, bounded history gap and session reset");
 }
