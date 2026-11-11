@@ -1217,6 +1217,7 @@ void tick_build_sync(void* /*player*/, const LocalState& local) {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
     build_locker_install_hooks();
     build_locker_send_pending();
+    build_solar_diagnostics();
 #endif
     build_send_completed();
     base_geometry::GhostEnvelope received_geometry;
@@ -1265,7 +1266,7 @@ void tick_build_sync(void* /*player*/, const LocalState& local) {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         // Locker completion/removal is explicit; neither preview polling nor
         // streaming absence may construct or demolish an interior container.
-        if (state.tech_type==interior_build::kLocker) continue;
+        if (interior_build::supported(state.tech_type)) continue;
 #endif
 
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)

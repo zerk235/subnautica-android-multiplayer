@@ -11,7 +11,7 @@ import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
 
-from build import source_build_id
+from build import source_build_id, session_protocol
 from fetch_installer_dependencies import jars as shizuku_jars
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,7 +68,7 @@ def main():
             ANDROID + "targetPackage": "io.github.zerk235.snmp.installer"})
     manifest.write(out / "AndroidManifest.xml", encoding="utf-8", xml_declaration=True)
     shutil.copyfile(library, out / "assets/libsnmod.so")
-    (out / "assets/mod.json").write_text(json.dumps({"buildId": identity, "sha256": hashlib.sha256(library.read_bytes()).hexdigest(), "protocol": 29}), encoding="utf-8")
+    (out / "assets/mod.json").write_text(json.dumps({"buildId": identity, "sha256": hashlib.sha256(library.read_bytes()).hexdigest(), "protocol": session_protocol()}), encoding="utf-8")
     for name in ("LICENSE.md", "THIRD_PARTY_NOTICES.md"):
         shutil.copyfile(ROOT / name, out / "assets" / name)
     # The APK contains the actual license, not just a link to the dependency.

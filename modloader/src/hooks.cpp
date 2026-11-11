@@ -15,6 +15,7 @@
 #include "il2cpp_api.h"
 #include "log.h"
 #include "managed_hook.h"
+#include "mapped_patch.h"
 #include "probe.h"
 
 #define ORIGINAL_MAIN "libmain_orig.so"
@@ -54,27 +55,12 @@ static uintptr_t module_base(const char* needle) {
 }
 
 bool mem_patch_write(void* addr, const void* data, size_t size) {
-    long page = sysconf(_SC_PAGESIZE);
-    uintptr_t start = (uintptr_t)addr & ~((uintptr_t)page - 1);
-    uintptr_t end = ((uintptr_t)addr + size + page - 1) & ~((uintptr_t)page - 1);
-    size_t span = (size_t)(end - start);
-
-    // Android never allows RWX on a file-backed mapping: ask for RW, patch, then RX.
-    if (mprotect((void*)start, span, PROT_READ | PROT_WRITE) != 0) {
-        LOG_ERROR("mprotect RW %p+%lu failed: %s", (void*)start, (unsigned long)span,
-                  strerror(errno));
-        return false;
-    }
-
-    memcpy(addr, data, size);
-    __builtin___clear_cache((char*)addr, (char*)addr + size);
-
-    // Android denies PROT_EXEC on file-backed pages for untrusted apps, so the page
-    // may stay writable. That is harmless here: nothing else maps it.
-    if (mprotect((void*)start, span, PROT_READ | PROT_EXEC) != 0) {
-        LOG_WARN("page %p stays writable: %s", (void*)start, strerror(errno));
-    }
-    return true;
+    const auto result = mapped_patch_write(addr, data, size);
+    if (!result.written)
+        LOG_ERROR("memory patch %p+%lu refused: %s", addr, (unsigned long)size, strerror(result.error));
+    if (result.restore_error)
+        LOG_WARN("memory patch %p: original page permissions not restored: %s", addr, strerror(result.restore_error));
+    return result.written;
 }
 
 static void** lookup_got_slot(const char* lib, const char* sym, void** current) {

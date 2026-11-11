@@ -4,23 +4,21 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-> **Public demo 0.3.6.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A native HUD marker now identifies your partner, using the Seamoth icon with a label and distance. Install directly on Android without a PC or root. See the [tested features and limitations](docs/COMPATIBILITY.md). Use a separate world and backups for your first tests.
+> **Public demo 0.3.7.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A native HUD marker now identifies your partner, using a custom player icon with a label and distance. Solar panels and Fabricators can now be built on a shared base. Install directly on Android without a PC or root. See the [tested features and limitations](docs/COMPATIBILITY.md). Use a separate world and backups for your first tests.
 
 This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Download and install
 
-**[Download installer 0.3.6 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.6-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.6-installer-preview)
+**[Download installer 0.3.7 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.7-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.7-installer-preview)
 
-**0.3.6 adds an automatic partner HUD marker.** It fixes the invalid references
-behind the marker crash and its near-distance transparency, as well as managed
-handle width and object loading readiness. Shared Locker contents from 0.3.5 remain.
-[Release notes and limitations (Russian)](docs/releases/0.3.6-installer-preview.md).
+**0.3.7 adds SolarPanel and Fabricator construction and demolition on shared bases.** It fixes an unnecessary post-crafting demolition block, guards occupied Seamoth entry, adds a custom player marker icon, and protects avatar updates after a visual-stage exception. Shared base energy and a shared crafting queue are not implemented.
+[Release notes and limitations (Russian)](docs/releases/0.3.7-installer-preview.md).
 
 Update the installer over the existing app and keep its data and signing key.
 Save and exit to the game menu, then **Prepare mod → Install prepared mod on both
 phones**. Updating only the installer does not update the game mod. Protocol is
-**29**; matching builds are required. Automatic recovery of an unfinished transfer
+**31**; matching builds are required. Automatic recovery of an unfinished transfer
 after a process crash is not implemented. Use a separate test world and ordinary
 resources first. [Locker contents](docs/LOCKER_CONTENTS.md) · [Diagnostics](docs/DIAGNOSTICS.md).
 
@@ -30,8 +28,8 @@ downloaded world. Autoload after switching roles retains the former host's origi
 When upgrading from 0.2, update SN Multiplayer Installer over the existing app,
 save your game and return to its main menu, then run **Prepare mod → Install
 prepared mod** on both phones. Keep the installer's data: it holds your update key.
-The current release requires protocol **29** and matching builds on both phones;
-older public protocols **23**, **25**, **27** and **28** are incompatible.
+The current release requires protocol **31** and matching builds on both phones;
+older public protocols **23**, **25**, **27**, **28** and **29** are incompatible.
 [Host-selection history in 0.3](docs/releases/0.3.0-installer-preview.md).
 
 Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with

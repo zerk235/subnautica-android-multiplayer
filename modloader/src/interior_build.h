@@ -9,6 +9,9 @@
 
 namespace interior_build {
 constexpr int kLocker=1504;
+constexpr int kSolarPanel=1517;
+constexpr int kFabricator=1502;
+inline bool supported(int tech) {return tech==kLocker||tech==kSolarPanel||tech==kFabricator;}
 inline bool nonzero(const uint8_t* p) {uint8_t bits=0;for(int i=0;i<16;++i)bits|=p[i];return bits!=0;}
 inline bool pose_valid(const float* p) {
     for(int i=0;i<7;++i)if(!std::isfinite(p[i]))return false;
@@ -18,13 +21,16 @@ inline bool pose_valid(const float* p) {
 }
 inline bool payload_valid(const WorldEvent& e) {
     const uint8_t allowed=kWorldBuildInterior|kWorldBuildComplete|kWorldBuildIsInside|kWorldBuildAttached;
-    return e.tech_type==kLocker && (e.kind==kWorldEventBuild||e.kind==kWorldEventRemove) &&
-        e.build_flags==allowed && e.constructed_amount==1.0f && e.object_id[0] &&
+    const uint8_t required=kWorldBuildInterior|kWorldBuildComplete;
+    const bool flags=e.tech_type!=kSolarPanel ? e.build_flags==allowed :
+        (e.build_flags&required)==required && !(e.build_flags&~allowed);
+    return supported(e.tech_type) && (e.kind==kWorldEventBuild||e.kind==kWorldEventRemove) &&
+        flags && e.constructed_amount==1.0f && e.object_id[0] &&
         std::memchr(e.object_id,0,sizeof(e.object_id)) && nonzero(e.class_id) &&
         nonzero(e.interior_parent_guid) && pose_valid(e.interior_local_pose);
 }
 inline bool same_placement(const WorldEvent& a,const WorldEvent& b) {
-    if(a.tech_type!=b.tech_type || std::memcmp(a.class_id,b.class_id,16) ||
+    if(a.tech_type!=b.tech_type || a.build_flags!=b.build_flags || std::memcmp(a.class_id,b.class_id,16) ||
        std::memcmp(a.interior_parent_guid,b.interior_parent_guid,16))return false;
     float distance=0,dot=0;
     for(int i=0;i<3;++i){const float d=a.interior_local_pose[i]-b.interior_local_pose[i];distance+=d*d;}

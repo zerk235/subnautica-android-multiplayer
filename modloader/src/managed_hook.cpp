@@ -4,8 +4,10 @@
 #include <string.h>
 
 #include <cmath>
+#include <cstring>
 #include <dlfcn.h>
 #include <math.h>
+#include <initializer_list>
 #include <pthread.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -20,6 +22,7 @@
 #include "locker_contents.h"
 #include "managed_root.h"
 #include "runtime_load_guard.h"
+#include "avatar_update_frame.h"
 #include <deque>
 #include <dirent.h>
 #include <unistd.h>
@@ -2988,11 +2991,15 @@ void spawn_avatar(const PeerState& peer) {
     }
     LOG_WARN("no free avatar slot for peer %08x", peer.id);
 }
-// Runs on the game thread, so Unity calls here are safe.
-void update_peer_avatars(void* player_self) {
+const char* g_avatar_update_stage = "idle";
+uint32_t g_avatar_update_peer = 0;
+
+// Runs on the game thread. The wrapper below owns the re-entry guard even when
+// one of the Unity calls throws and never reaches the end of this function.
+void update_peer_avatars_inner(void* player_self) {
     if (!g_instantiate || !g_set_position || !g_set_euler) return;
-    if (g_updating_avatars) return;
-    g_updating_avatars = true;
+    g_avatar_update_stage = "local-object";
+    g_avatar_update_peer = 0;
     ++g_avatar_frame;
 
     // A new world means a new player object, so the old avatars are stale.
@@ -3021,7 +3028,6 @@ void update_peer_avatars(void* player_self) {
         LOG_INFO("local player object = %p", g_local_game_object);
     }
     if (!g_local_game_object) {
-        g_updating_avatars = false;
         return;
     }
 
@@ -3033,6 +3039,7 @@ void update_peer_avatars(void* player_self) {
     // two seconds, which is log pressure on the game thread for no extra information. What
     // matters is the side-by-side with the clone, so print only the three parameters the pose
     // actually depends on.
+    g_avatar_update_stage = "local-animator";
     if (g_anim_get_float && (g_avatar_frame % 120) == 0 && g_local_game_object) {
         // Re-walk the local hierarchy on every tick instead of caching the Animator pointer.
         // The local avatar is rebuilt on respawn, and the cached one keeps pointing into freed
@@ -3057,6 +3064,7 @@ void update_peer_avatars(void* player_self) {
         }
     }
 
+    g_avatar_update_stage = "peer-list";
     PeerState peers[kMaxPeers];
     size_t count = net_copy_peers(peers, kMaxPeers);
 
@@ -3065,17 +3073,31 @@ void update_peer_avatars(void* player_self) {
         // Discovery/HELLO is not a usable player pose. A loading guest publishes
         // no state until the local world guard is ready.
         if(!peer.seq_valid)continue;
+        g_avatar_update_peer = peer.id;
+        g_avatar_update_stage = "spawn";
         RemoteAvatar* avatar = find_avatar(peer.id);
         if (!avatar) {
             spawn_avatar(peer);
             avatar = find_avatar(peer.id);
         }
         if (!avatar || !avatar->transform) continue;
+        g_avatar_update_stage = "liveness";
         if (!avatar_object_live(avatar)) {
             // A streamed-out interior may have destroyed its parented visual copy.
             memset(avatar,0,sizeof(*avatar));
             continue;
         }
+        // Move the body before optional equipment/tool work. A visual component
+        // failure must not prevent the next received position from being used.
+        g_avatar_update_stage = "root-pose";
+        Vector3 position{peer.x, peer.y, peer.z};
+        g_set_position.call(avatar->transform, position, g_set_position.method);
+        Vector3 euler{0.0f, peer.yaw, 0.0f};
+        g_set_euler.call(avatar->transform, euler, g_set_euler.method);
+        avatar->last_update = g_avatar_frame;
+
+        g_avatar_update_stage = "environment";
+        update_avatar_environment(avatar,peer);
         // One frame after the applier was added, Unity has run its Start(). Reports once per peer.
         verify_sky_applier(avatar);
         // Peer-driven equipment (item sync v3): the avatar wears what the peer really wears,
@@ -3083,6 +3105,7 @@ void update_peer_avatars(void* player_self) {
         // which painted every avatar in the local player's suit: each side saw the other dressed
         // as itself. The spawn-time mirror still normalises a fresh clone; after that the peer
         // owns its look, and the holding_* pose follows the peer's held item for free.
+        g_avatar_update_stage = "equipment";
         apply_peer_equipment(avatar, peer);
         // The applier's own idea of which sky it is applying is what decides whether the clone is
         // actually lit, and that changes over time as the clone moves and the updater ticks. Sampled
@@ -3091,18 +3114,9 @@ void update_peer_avatars(void* player_self) {
             log_sky_applier_fields("periodic", avatar->sky_applier, -1);
         }
 
-        Vector3 position{peer.x, peer.y, peer.z};
-        g_set_position.call(avatar->transform, position, g_set_position.method);
-        update_avatar_environment(avatar,peer);
-        // The body yaw comes from the model child, not the root: the root Player transform
-        // never rotates in Subnautica and would send a constant zero. The camAnchor yaw is
-        // published separately as view_yaw and reaches the animator as view_turn.
-        Vector3 euler{0.0f, peer.yaw, 0.0f};
-        g_set_euler.call(avatar->transform, euler, g_set_euler.method);
-        avatar->last_update = g_avatar_frame;
-
         // Piloting peer: the diver sits inside the vehicle (driven by tick_remote_vehicles
         // below), so the clone hides instead of standing where the seat is.
+        g_avatar_update_stage = "visibility";
         bool driving = (peer.flags & kFlagPiloting) != 0;
         if (driving != avatar->piloting_hidden && g_set_active && avatar->game_object) {
             g_set_active.call(avatar->game_object, !driving, g_set_active.method);
@@ -3112,19 +3126,27 @@ void update_peer_avatars(void* player_self) {
         }
         if (driving) continue;
 
+        g_avatar_update_stage = "animation";
         drive_avatar_animator(avatar, peer, position);
         // The peer's held item as a prop on this clone, after the animator so a freshly spawned
         // prop lands on the pose it was created in. The follow re-glues it every frame after.
+        g_avatar_update_stage = "held-item";
         update_avatar_held_prop(avatar, peer.held_tech);
+        g_avatar_update_stage = "held-follow";
         follow_avatar_held_prop(avatar);
+        g_avatar_update_stage = "held-rotation";
         apply_peer_held_rotation(avatar,peer);
+        g_avatar_update_stage = "held-light";
         apply_peer_held_light(avatar,peer);
     }
 
     // Remote vehicles ride on the same peer list: teleport + kinematic + pilot tracking.
+    g_avatar_update_peer = 0;
+    g_avatar_update_stage = "vehicles";
     tick_remote_vehicles(peers, count);
 
     // Drop avatars whose peer has been gone for longer than the grace period.
+    g_avatar_update_stage = "cleanup";
     for (size_t i = 0; i < kMaxAvatars; i++) {
         if (!g_avatars[i].used) continue;
         bool still_here = false;
@@ -3137,7 +3159,23 @@ void update_peer_avatars(void* player_self) {
         destroy_avatar(&g_avatars[i]);
     }
 
-    g_updating_avatars = false;
+    g_avatar_update_stage = "idle";
+}
+
+void update_peer_avatars(void* player_self) {
+    run_avatar_update_frame(g_updating_avatars,
+        [&] { update_peer_avatars_inner(player_self); },
+        [] {
+            static double next_report = 0;
+            static unsigned failures = 0;
+            ++failures;
+            const double now = monotonic_seconds();
+            if (now >= next_report) {
+                LOG_WARN("avatar update: game exception stage=%s peer=%08x failures=%u; guard released, next frame will retry",
+                         g_avatar_update_stage, g_avatar_update_peer, failures);
+                next_report = now + 5.0;
+            }
+        });
 }
 
 void resolve_avatar_api() {
@@ -5815,6 +5853,8 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
     }
 }
 
+#include "vehicle_seat_guard.inc"
+
 // The TechType of the item in the local player's hand, as the enum's integer value, 0 for bare
 // hands. Two cheap calls, safe every frame; runs on the game thread from Player.Update.
 uint32_t read_held_tech() {
@@ -6883,6 +6923,8 @@ void hooked_player_update(void* self, void* method) {
         return;
     }
 
+    install_seamoth_seat_hooks();
+
     bool has_session_role_note = false;
     bool pending_session_is_host = false;
     uint32_t pending_session_host_id = 0;
@@ -7329,6 +7371,8 @@ bool install_managed_hooks() {
     // rendering a peer depends on the save subsystem, so a build that cannot resolve it is
     // still a working build.
     resolve_save_api();
+
+    install_seamoth_seat_hooks();
 
     // SaveLoadManager.Update is the menu-scene game-thread tick: the manager exists in the
     // main menu, where Player.Update does not, and its class is materialised at install

@@ -1,4 +1,4 @@
-// First ordinary interior Constructable: floor Locker only. Contents are local.
+// Exact-base Constructables. Locker contents and crafting are separate systems.
 using LockerChildrenFn=void* (*)(void*,void*,bool,void*);
 using LockerRotationFn=void (*)(void*,Quaternion,void*);
 struct LockerApi {
@@ -53,12 +53,34 @@ void* build_locker_storage(void* go,bool require_container) {
     return !require_container||container ? storage : nullptr;
 }
 
-bool build_locker_capture(void* c,WorldEvent* out) {
-    if(!build_locker_resolve()||!build_capture(c,out)||out->tech_type!=interior_build::kLocker||
+#include "solar_panel.inc"
+#include "fabricator_sync.inc"
+
+bool build_attached_components(void* go,int tech,bool require_ready) {
+    switch(tech) {
+    case interior_build::kLocker:return build_locker_storage(go,require_ready)!=nullptr;
+    case interior_build::kSolarPanel:return build_solar_component(go)!=nullptr;
+    case interior_build::kFabricator:return build_fabricator_component(go,require_ready)!=nullptr;
+    default:return false;
+    }
+}
+
+bool& build_attached_failed(int tech) {
+    if(tech==interior_build::kSolarPanel)return g_solar_panel_api.failed;
+    if(tech==interior_build::kFabricator)return g_fabricator_api.failed;
+    return g_locker_api.failed;
+}
+
+bool build_attached_capture(void* c,WorldEvent* out) {
+    if(!build_locker_resolve()||!build_capture(c,out)||!interior_build::supported(out->tech_type)||
        il2cpp_object_get_class(reinterpret_cast<Il2CppObject*>(c))!=g_build_class)return false;
-    bool inside=false;
+    const bool solar=out->tech_type==interior_build::kSolarPanel;
+    bool inside=false,attached=false;
     il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(c),g_build_inside_field,&inside);
+    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(c),g_build_attached_field,&attached);
     void* go=g_get_game_object.call(c,g_get_game_object.method);
+    if(solar&&!build_solar_component(go))return false;
+    if(out->tech_type==interior_build::kFabricator&&!build_fabricator_component(go,false))return false;
     void *base=nullptr,*root=nullptr;
     walk_parents(go,[&](void* node){
         void* r=g_get_component.call(node,g_locker_api.root_type,g_get_component.method);
@@ -66,8 +88,8 @@ bool build_locker_capture(void* c,WorldEvent* out) {
         il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(r),g_locker_api.base_field,&base);
         root=r;return true;
     });
-    if(!inside||!build_live(base)||!root) {
-        LOG_INFO("locker: capture deferred id=%s inside=%u base=%p",out->object_id,unsigned(inside),base);return false;
+    if((!solar&&!inside)||!build_live(base)||!root) {
+        LOG_INFO("attached build: capture deferred id=%s tech=%d inside=%u base=%p",out->object_id,out->tech_type,unsigned(inside),base);return false;
     }
     void* uid=build_uid(base);char id[kWorldEventObjectIdSize]{};
     if(!uid||!string_to_ascii(g_unique_get_id.call(uid,g_unique_get_id.method),id,sizeof(id))||!id[0])return false;
@@ -80,10 +102,16 @@ bool build_locker_capture(void* c,WorldEvent* out) {
     guid_from_string(id,out->interior_parent_guid);
     const float pose[7]={p.x,p.y,p.z,local.x,local.y,local.z,local.w};
     memcpy(out->interior_local_pose,pose,sizeof(pose));
-    out->build_flags=kWorldBuildComplete|kWorldBuildInterior|kWorldBuildIsInside|kWorldBuildAttached;
+    out->build_flags=kWorldBuildComplete|kWorldBuildInterior|
+        ((inside||!solar)?kWorldBuildIsInside:0)|((attached||!solar)?kWorldBuildAttached:0);
     out->constructed_amount=1.0f;out->kind=kWorldEventBuild;
     return build_class_bytes(g_build_class_id.call(out->tech_type,g_build_class_id.method),out->class_id)&&
         interior_build::payload_valid(*out);
+}
+
+// Contents code must continue to accept only a floor locker, never a power source.
+bool build_locker_capture(void* c,WorldEvent* out) {
+    return build_attached_capture(c,out)&&out->tech_type==interior_build::kLocker;
 }
 
 void build_locker_queue(WorldEvent state,uint8_t kind) {
@@ -91,8 +119,8 @@ void build_locker_queue(WorldEvent state,uint8_t kind) {
     if(!g_locker_registry.accept(state)){LOG_WARN("locker: identity/allocation refused id=%s",state.object_id);return;}
     auto* r=g_locker_registry.find(state.object_id);r->publish=true;
     r->next_send=0;r->expires=build_now()+kBuildJobDeadlineSeconds;
-    LOG_INFO("locker: confirmed %s id=%s parent=%02x%02x%02x%02x local=(%.3f,%.3f,%.3f)",
-        kind==kWorldEventRemove?"demolition":"completion",state.object_id,
+    LOG_INFO("attached build: confirmed %s id=%s tech=%d parent=%02x%02x%02x%02x local=(%.3f,%.3f,%.3f)",
+        kind==kWorldEventRemove?"demolition":"completion",state.object_id,state.tech_type,
         state.interior_parent_guid[0],state.interior_parent_guid[1],state.interior_parent_guid[2],state.interior_parent_guid[3],
         state.interior_local_pose[0],state.interior_local_pose[1],state.interior_local_pose[2]);
 }
@@ -103,7 +131,7 @@ uint8_t build_locker_set_state(void* self,uint8_t value,uint8_t set_amount,void*
     if(eligible)il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(self),g_build_complete_field,&was_complete);
     return base_geometry::observe_completion(value,was_complete,eligible&&build_is_preview(self),
         g_applying_remote!=0,eligible,
-        [&](){return build_locker_capture(self,&state);},
+        [&](){return build_attached_capture(self,&state);},
         [&](){return g_locker_set_state_original(self,value,set_amount,method);},
         [&](){build_locker_queue(state,kWorldEventBuild);},
         [&](const char* stage){LOG_WARN("locker: completion observation failed stage=%s",stage);});
@@ -116,7 +144,7 @@ void* build_locker_deconstruction(void* self,void* method) {
         il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(self),g_build_complete_field,&complete);
     }
     return base_geometry::observe_deconstruction(amount,complete,g_applying_remote!=0,eligible,
-        eligible&&build_is_preview(self),[&](){return build_locker_capture(self,&state);},
+        eligible&&build_is_preview(self),[&](){return build_attached_capture(self,&state);},
         [&](){return g_locker_deconstruction_original(self,method);},
         [&](){build_locker_queue(state,kWorldEventRemove);},
         [&](const char* stage){LOG_WARN("locker: demolition observation failed stage=%s",stage);});
@@ -175,7 +203,9 @@ void* build_locker_parent(const WorldEvent& e) {
 struct LockerRemoteScope {int prior=g_applying_remote;LockerRemoteScope(){++g_applying_remote;}~LockerRemoteScope(){g_applying_remote=prior;}};
 
 bool build_apply_locker(const WorldEvent& e) {
-    if(!interior_build::payload_valid(e)||g_locker_api.failed)return true;
+    const bool locker=e.tech_type==interior_build::kLocker;
+    const bool fabricator=e.tech_type==interior_build::kFabricator;
+    if(!interior_build::payload_valid(e)||build_attached_failed(e.tech_type))return true;
     if(!build_locker_resolve())return false;
     auto* record=g_locker_registry.find(e.object_id);
     if(!record||!interior_build::same_placement(record->state,e))return true;
@@ -186,17 +216,23 @@ bool build_apply_locker(const WorldEvent& e) {
         void* parent=build_locker_parent(e);if(!parent)return false;
         void* existing=build_find(e);WorldEvent actual{};
         if(existing) {
-            if(!build_locker_capture(existing,&actual)||!interior_build::same_placement(actual,e)) {
+            if(!build_attached_capture(existing,&actual)||!interior_build::same_placement(actual,e)) {
                 LOG_WARN("locker: existing placement mismatch id=%s",e.object_id);return true;
             }
             if(!remove) {
                 bool complete=false;il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(existing),g_build_complete_field,&complete);
-                return complete&&build_locker_storage(g_get_game_object.call(existing,g_get_game_object.method),true);
+                void* go=g_get_game_object.call(existing,g_get_game_object.method);
+                const bool ready=complete&&build_attached_components(go,e.tech_type,true);
+                if(ready&&fabricator)build_fabricator_log_ready(go,e.object_id);
+                return ready;
             }
             void* go=g_get_game_object.call(existing,g_get_game_object.method);
-            if(contents_locker_busy(e.object_id))return false;
-            void* storage=build_locker_storage(go,true);void* reason=nullptr;
-            if(!storage||!g_locker_api.empty.call(storage,g_locker_api.empty.method)||
+            if(locker&&contents_locker_busy(e.object_id))return false;
+            if(fabricator&&!build_fabricator_removal_ready(go,e.object_id)) {
+                LOG_INFO("fabricator: removal deferred id=%s; see removal state",e.object_id);return false;
+            }
+            void* storage=locker?build_locker_storage(go,true):nullptr;void* reason=nullptr;
+            if((locker&&(!storage||!g_locker_api.empty.call(storage,g_locker_api.empty.method)))||
                !g_locker_api.allowed.call(existing,&reason,g_locker_api.allowed.method)) {
                 LOG_INFO("locker: removal deferred id=%s storage not empty/ready or native permission blocked",e.object_id);return false;
             }
@@ -204,7 +240,7 @@ bool build_apply_locker(const WorldEvent& e) {
             stage="remove-state";g_locker_api.set_state.call(existing,0,0,g_locker_api.set_state.method);
             stage="destroy";g_object_destroy.call(go,g_object_destroy.method);
             record->removal_applied=true;
-            LOG_INFO("locker: removed id=%s verified=1",e.object_id);return true;
+            LOG_INFO("attached build: removed id=%s tech=%d verified=1",e.object_id,e.tech_type);return true;
         }
         if(remove){record->removal_applied=true;LOG_INFO("locker: already absent id=%s",e.object_id);return true;}
         void* class_text=g_build_class_id.call(e.tech_type,g_build_class_id.method);uint8_t bytes[16]{};
@@ -215,7 +251,8 @@ bool build_apply_locker(const WorldEvent& e) {
         void* pc=g_get_component.call(prefab,g_build_type,g_get_component.method);int32_t tech=0;
         if(!pc||il2cpp_object_get_class(reinterpret_cast<Il2CppObject*>(pc))!=g_build_class)return true;
         il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(pc),g_build_tech_field,&tech);
-        if(tech!=interior_build::kLocker||!build_locker_storage(prefab,false)||g_build_id_root_count>=kBuildKnownLimit)return true;
+        if(tech!=e.tech_type||g_build_id_root_count>=kBuildKnownLimit)return true;
+        if(!build_attached_components(prefab,e.tech_type,false))return false;
         LockerRemoteScope scope;
         stage="instantiate";owned=g_build_instantiate.call(prefab,e.tech_type,false,g_build_instantiate.method);
         if(!build_live(owned))return false;
@@ -229,24 +266,27 @@ bool build_apply_locker(const WorldEvent& e) {
         const auto* p=e.interior_local_pose;
         g_locker_api.set_local_position.call(tr,{p[0],p[1],p[2]},g_locker_api.set_local_position.method);
         g_locker_api.set_local_rotation.call(tr,{p[3],p[4],p[5],p[6]},g_locker_api.set_local_rotation.method);
-        bool yes=true;
-        il2cpp_field_set_value(reinterpret_cast<Il2CppObject*>(c),g_build_inside_field,&yes);
-        il2cpp_field_set_value(reinterpret_cast<Il2CppObject*>(c),g_build_attached_field,&yes);
+        bool inside=e.build_flags&kWorldBuildIsInside,attached=e.build_flags&kWorldBuildAttached;
+        il2cpp_field_set_value(reinterpret_cast<Il2CppObject*>(c),g_build_inside_field,&inside);
+        il2cpp_field_set_value(reinterpret_cast<Il2CppObject*>(c),g_build_attached_field,&attached);
         stage="native-completion";
         g_locker_api.set_state.call(c,0,0,g_locker_api.set_state.method);
         float amount=1;il2cpp_field_set_value(reinterpret_cast<Il2CppObject*>(c),g_build_amount_field,&amount);
         g_locker_api.set_state.call(c,1,0,g_locker_api.set_state.method);
         bool complete=false;il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(c),g_build_complete_field,&complete);
-        void* storage=build_locker_storage(owned,true);
-        if(!complete||!storage||!g_locker_api.empty.call(storage,g_locker_api.empty.method)||
-           !build_locker_capture(c,&actual)||!interior_build::same_placement(actual,e))throw "locker completion readback failed";
+        void* storage=locker?build_locker_storage(owned,true):nullptr;
+        if(!complete||!build_attached_components(owned,e.tech_type,false)||
+           (locker&&(!storage||!g_locker_api.empty.call(storage,g_locker_api.empty.method)))||
+           !build_attached_capture(c,&actual)||!interior_build::same_placement(actual,e))throw "attached completion readback failed";
+        const bool ready=build_attached_components(owned,e.tech_type,true);
+        if(ready&&fabricator)build_fabricator_log_ready(owned,e.object_id);
         owned=nullptr;
-        LOG_INFO("locker: applied id=%s verified=1 parent=exact local_pose=matched storage=ready",e.object_id);
-        return true;
+        LOG_INFO("attached build: applied id=%s tech=%d verified=1 parent=exact local_pose=matched native_components=verified ready=%u",e.object_id,e.tech_type,unsigned(ready));
+        return ready;
     } catch(...) {
-        g_locker_api.failed=true;
+        build_attached_failed(e.tech_type)=true;
         try {if(owned&&build_live(owned))g_object_destroy.call(owned,g_object_destroy.method);}catch(...){}
-        LOG_WARN("locker: exception id=%s stage=%s; locker replay disabled until restart",e.object_id,stage);
+        LOG_WARN("attached build: exception id=%s tech=%d stage=%s; replay of this type disabled until restart",e.object_id,e.tech_type,stage);
         return true;
     }
 }

@@ -102,6 +102,22 @@ class ToolsTests(unittest.TestCase):
         source.write_bytes(b"two\n")
         self.assertNotEqual(builder.source_build_id(native), before)
 
+    def test_installer_protocol_follows_native_demo_branch(self):
+        native = self.root / "modloader"
+        (native / "src").mkdir(parents=True)
+        header = native / "src/net.h"
+        for protocol in (29, 31, 65535):
+            header.write_text("#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)\n"
+                              f"constexpr uint16_t kSessionProtocolVersion = {protocol};\n"
+                              "#else\nconstexpr uint16_t kSessionProtocolVersion = 10;\n#endif\n")
+            self.assertEqual(builder.session_protocol(native), protocol)
+        for invalid in ("", "constexpr uint16_t kSessionProtocolVersion = 10;",
+                        "#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)\nconstexpr uint16_t kSessionProtocolVersion = 0;",
+                        "#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)\nconstexpr uint16_t kSessionProtocolVersion = 65536;"):
+            header.write_text(invalid)
+            with self.assertRaises(ValueError):
+                builder.session_protocol(native)
+
 
 if __name__ == "__main__":
     unittest.main()

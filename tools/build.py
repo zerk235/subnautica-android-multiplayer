@@ -3,12 +3,23 @@
 import argparse
 import hashlib
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "modloader"
+
+
+def session_protocol(root=SOURCE):
+    """Protocol for the geometry-capture demo configured by this builder."""
+    header = (root / "src/net.h").read_text(encoding="utf-8")
+    found = re.search(r"#if defined\(SNMOD_BASE_GEOMETRY_CAPTURE\)\s+"
+                      r"constexpr uint16_t kSessionProtocolVersion = (\d+);", header)
+    if not found or not 1 <= int(found.group(1)) <= 65535:
+        raise ValueError("Cannot identify the demo session protocol in net.h")
+    return int(found.group(1))
 
 
 def source_build_id(root=SOURCE):

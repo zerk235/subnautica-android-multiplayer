@@ -48,6 +48,9 @@ bool hud_live(void* object) {
     auto& a=g_peer_hud_api;
     return object&&a.exists&&a.exists.call(object,a.exists.method);
 }
+
+#include "player_hud_icon.inc"
+
 void hud_marker_destroy(const char* reason) {
     auto& m=g_peer_hud;
     void* go=m.go.get();
@@ -58,6 +61,7 @@ void hud_marker_destroy(const char* reason) {
     }
     if(go)LOG_INFO("peer HUD: removed peer=%08x reason=%s",m.peer,reason);
     m.ping.clear();m.transform.clear();m.go.clear();
+    g_peer_hud_icon.widget.clear();
     m.peer=0;m.registered=false;m.created_at=0;
 }
 
@@ -145,7 +149,9 @@ bool hud_marker_create(const PeerState& peer) {
        !managed_reference_set_checked(ping,a.label,reinterpret_cast<Il2CppObject*>(label.get()))) {
         hud_marker_destroy("reference validation failed");return false;
     }
-    int32_t type=2; // The existing Seamoth icon, with a distinct player label.
+    // Native registration uses a supported ping type; only this marker's own
+    // widget receives the player silhouette, without changing any vehicle icons.
+    int32_t type=2;
     bool visible=true,display=true;
     // UpdatePings uses range as FADE-IN width: alpha = lerp(alphaMin,alphaMax,
     // clamp((distance-minDist)/range)). 500 made a nearby marker almost invisible.
@@ -240,6 +246,7 @@ void tick_player_hud_marker(const LocalState& local,bool enabled) {
             LOG_INFO("peer HUD: native initialization complete peer=%08x",m.peer);
         } else if(now-m.created_at>3){hud_marker_destroy("Start did not initialize");return;}
     }
+    if(m.registered)hud_icon_tick();
     if(now>=m.next_report) {
         m.next_report=now+5;
         LOG_INFO("peer HUD: alive peer=%08x registered=%u reference_verified=1 seq=%u",m.peer,unsigned(m.registered),peer->sequence);

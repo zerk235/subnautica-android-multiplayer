@@ -23,7 +23,7 @@ constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 29;  // finite opt-in single-creature experiment
+constexpr uint16_t kSessionProtocolVersion = 31;  // exact-base Fabricator completion and demolition
 #else
 constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
 #endif
@@ -328,7 +328,7 @@ constexpr uint8_t kWorldBuildForceUpright = 0x04;
 constexpr uint8_t kWorldBuildRotatable = 0x08;
 constexpr uint8_t kWorldBuildAttached = 0x10;
 constexpr uint8_t kWorldBuildAnchored = 0x20;
-constexpr uint8_t kWorldBuildInterior = 0x80; // completed Locker in an exact shared Base
+constexpr uint8_t kWorldBuildInterior = 0x80; // completed supported Constructable in an exact shared Base
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 constexpr uint8_t kWorldBuildHasGeometry = 0x40;
 #endif
