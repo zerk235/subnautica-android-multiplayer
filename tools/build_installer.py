@@ -144,7 +144,10 @@ def main():
     subprocess.run([str(bt / ("zipalign" + suffix)), "-f", "-P", "16", "4", str(unsigned), str(aligned)], check=True)
     artifact = aligned
     if args.keystore:
-        password = getpass.getpass("Installer signing keystore password: ")
+        # Prefer the environment so automated/sandboxed runs never block on a TTY prompt.
+        password = os.environ.get("SNMP_INSTALLER_SIGN_PASS", "")
+        if not password:
+            password = getpass.getpass("Installer signing keystore password: ")
         if not password: parser.error("Empty password")
         env = os.environ.copy(); env["SNMP_INSTALLER_SIGN_PASS"] = password
         artifact = out / ("snmp-installer-test.apk" if args.test else "snmp-installer-preview.apk")

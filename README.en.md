@@ -4,16 +4,16 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-> **Public demo 0.3.7.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A native HUD marker now identifies your partner, using a custom player icon with a label and distance. Solar panels and Fabricators can now be built on a shared base. Install directly on Android without a PC or root. See the [tested features and limitations](docs/COMPATIBILITY.md). Use a separate world and backups for your first tests.
+> **Public demo 0.3.8.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A native HUD marker identifies your partner with a custom player icon, label and distance. Solar panels and Fabricators can be built on a shared base. The installer now has a dark teal interface with **Home**, **Install**, **Worlds** and **Settings** tabs. Install directly on Android without a PC or root. See the [tested features and limitations](docs/COMPATIBILITY.md). Use a separate world and backups for your first tests.
 
 This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Download and install
 
-**[Download installer 0.3.7 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.7-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.7-installer-preview)
+**[Download installer 0.3.8 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.8-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.8-installer-preview)
 
-**0.3.7 adds SolarPanel and Fabricator construction and demolition on shared bases.** It fixes an unnecessary post-crafting demolition block, guards occupied Seamoth entry, adds a custom player marker icon, and protects avatar updates after a visual-stage exception. Shared base energy and a shared crafting queue are not implemented.
-[Release notes and limitations (Russian)](docs/releases/0.3.7-installer-preview.md).
+**0.3.8 updates the installer interface:** Home, Install, Worlds and Settings tabs, cards, status chips and step badges. It fixes tab-switching and profile-recovery crashes and a blank screen caused by overlapping screens. The native mod build and protocol **31** are unchanged.
+[Release notes and limitations (Russian)](docs/releases/0.3.8-installer-preview.md).
 
 Update the installer over the existing app and keep its data and signing key.
 Save and exit to the game menu, then **Prepare mod → Install prepared mod on both
