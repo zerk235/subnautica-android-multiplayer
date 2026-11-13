@@ -7275,9 +7275,50 @@ void world_context_tick(void* manager) {
     if(at_menu) net_session_set_world_active(false);
     launch_role_bridge_tick(at_menu);
 }
+void world_notice_tick() {
+    static Entry<void (*)(void*,void*)> add_message;
+    static void* message_main = nullptr;
+    static double next_check = 0.0;
+    const double now = monotonic_seconds();
+    if (now < next_check) return;
+    next_check = now + 0.15;
+    if (!add_message || !message_main) {
+        auto* klass = find_class_in_domain("", "ErrorMessage");
+        add_message.bind(find_method_typed(klass,"AddMessage",1,"system.string"));
+        message_main = autoload_field_on(klass,"main",0);
+        if (!add_message || !message_main) {
+            next_check = now + 2.0;
+            return;
+        }
+    }
+    void* instance = nullptr;
+    il2cpp_field_static_get_value(message_main,&instance);
+    if (!instance) return;
+    WorldNotice notice;
+    if (!net_take_world_notice(&notice)) return;
+    const char* text = nullptr;
+    switch (notice) {
+        case WorldNotice::HostFound: text = "Кооп: хост найден. Подключаемся…"; break;
+        case WorldNotice::GuestFound: text = "Кооп: напарник найден. Готовим передачу мира…"; break;
+        case WorldNotice::Sending: text = "Кооп: отправляем мир напарнику…"; break;
+        case WorldNotice::Receiving: text = "Кооп: получаем мир от хоста…"; break;
+        case WorldNotice::Received: text = "Кооп: мир получен. Готовим загрузку…"; break;
+        case WorldNotice::Sent: text = "Кооп: напарник получил мир"; break;
+        case WorldNotice::ReceiveFailed: text = "Кооп: не удалось получить мир"; break;
+        case WorldNotice::SendFailed: text = "Кооп: передача мира прервалась"; break;
+    }
+    try {
+        if (void* message = cached_managed_string(text)) {
+            add_message.call(message,add_message.method);
+            LOG_INFO("world notice: %s",text);
+        }
+    } catch (...) { LOG_WARN("world notice: game message unavailable"); }
+}
+
 void hooked_slm_update(void* self, void* method) {
     if (g_slm_update_original) g_slm_update_original(self, method);
     world_context_tick(self);
+    world_notice_tick();
     menu_autoload_tick();
     loader_diag_tick();
 }
@@ -7448,6 +7489,9 @@ bool install_managed_hooks() {
         LOG_WARN("ArmsController.Update not found, arm IK will stay under local control");
     }
 
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    contents_install_reactor_update();
+#endif
     LOG_INFO("managed hooks installed: Player.Update (direct=%p virtual=%p invoker=%p)",
              direct, virt, invoker);
     LOG_INFO("SNMOD_READY managed hooks installed, net starting");

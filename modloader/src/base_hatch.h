@@ -3,19 +3,23 @@
 #include <utility>
 
 namespace base_geometry {
+constexpr int kBioreactorTech=5528;
+constexpr int kBioreactorFace=14;
 // Android 1.22.83315 structural face recipes. Other face modules carry their
 // own state or multi-face topology and must not enter this face path.
 // Dome5540 is one normalized Room-root Above face (native BuildRoomGeometry),
 // with an additional complete room footprint check at replay.
 inline int face_type_for_tech(int32_t tech) {
-    switch (tech) { case 5501:return 3; case 5505:return 2; case 5514:return 6; case 5540:return 18; default:return -1; }
+    switch (tech) { case 5501:return 3; case 5505:return 2; case 5514:return 6; case 5540:return 18;
+        case kBioreactorTech:return kBioreactorFace; default:return -1; }
 }
 inline const char* face_descriptor_class(int32_t tech) {
     switch (tech) { case 5501:return "BaseHatchFace"; case 5505:return "BaseWindowFace";
-        case 5514:return "BaseReinforcementFace"; case 5540:return "BaseRoomDomeFace"; default:return "UnsupportedFace"; }
+        case 5514:return "BaseReinforcementFace"; case 5540:return "BaseRoomDomeFace";
+        case kBioreactorTech:return "BaseBioreactorFace"; default:return "UnsupportedFace"; }
 }
 inline int face_descriptor_tech(const GhostEnvelope& e) {
-    for (int tech:{5501,5505,5514,5540}) if (e.ghost_class==face_descriptor_class(tech)) return tech;
+    for (int tech:{5501,5505,5514,5540,kBioreactorTech}) if (e.ghost_class==face_descriptor_class(tech)) return tech;
     return 0;
 }
 // Canonical descriptor: one target cell and exactly one face, never cell topology.
@@ -35,7 +39,7 @@ inline GhostEnvelope face_descriptor(GhostEnvelope e,std::array<int32_t,3> cell,
 }
 inline int face_direction(const GhostEnvelope& e,int32_t tech) {
     const int type=face_type_for_tech(tech);
-    if (type<0 || e.ghost_class!=face_descriptor_class(tech) || e.target_base_id.empty() ||
+    if (type<0 || e.creates_base || e.ghost_class!=face_descriptor_class(tech) || e.target_base_id.empty() ||
         !valid(e.geometry) || e.geometry.shape!=std::array<int32_t,3>{1,1,1} ||
         e.geometry.cells!=std::vector<uint8_t>{0} || e.geometry.links!=std::vector<uint8_t>{0} ||
         e.geometry.glass!=std::vector<uint8_t>{0} || e.geometry.masks.size()!=1 ||

@@ -71,7 +71,7 @@ public final class InstallerTests extends Instrumentation {
             new PatchEngine(context).removeOwnTree(dir);
             result.putString("result","PASS: streaming patch, original preservation/repatch, overwrite/ELF guards, manifest parsing, persistent Android Keystore, on-device APK signing/verification"
                 + ("prepare-game".equals(mode)?", real game full preparation and signature conflict guard":"")
-                + ("sessions".equals(mode)?", fresh Android split session, base-only update, split SHA256 and private app-data preservation":""));
+                + ("sessions".equals(mode)?", fresh and update Android split sessions, split SHA256 and private app-data preservation":""));
             PatchService.status(context,"Автоматические проверки установщика прошли. Игра и её сохранения не менялись.");
             PatchService.BUSY.set(false);
             finish(-1,result);
@@ -99,21 +99,21 @@ public final class InstallerTests extends Instrumentation {
         getUiAutomation().adoptShellPermissionIdentity("android.permission.INSTALL_PACKAGES","android.permission.DELETE_PACKAGES");
         try {
             // Only this fixed disposable package is installed; never the game.
-            check(commit(context,fixture,true,Arrays.asList(base,split),progress)==PackageInstaller.STATUS_SUCCESS,"fresh split session");
+            check(commit(context,fixture,Arrays.asList(base,split),progress)==PackageInstaller.STATUS_SUCCESS,"fresh split session");
             PackageInfo first=context.getPackageManager().getPackageInfo(fixture,0);
             check(first.splitNames!=null && Arrays.asList(first.splitNames).contains("demo_assets"),"initial split missing");
             context.startActivity(new Intent().setClassName(fixture,fixture+".FixtureActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             String dataBefore=fixtureMarker(context);
             File sentinel=new File(context.getPackageManager().getApplicationInfo(fixture,0).splitSourceDirs[0]);
             String before=ApkPatcher.sha256(sentinel);
-            check(commit(context,fixture,false,Collections.singletonList(base),progress)==PackageInstaller.STATUS_SUCCESS,"partial base session");
+            check(commit(context,fixture,Arrays.asList(base,split),progress)==PackageInstaller.STATUS_SUCCESS,"complete split update");
             PackageInfo next=context.getPackageManager().getPackageInfo(fixture,0);
-            check(next.splitNames!=null && Arrays.asList(next.splitNames).contains("demo_assets"),"partial update lost split");
+            check(next.splitNames!=null && Arrays.asList(next.splitNames).contains("demo_assets"),"update lost split");
             context.startActivity(new Intent().setClassName(fixture,fixture+".FixtureActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             File retained=new File(context.getPackageManager().getApplicationInfo(fixture,0).splitSourceDirs[0]);
             check(before.equals(ApkPatcher.sha256(retained)),"resource split changed");
             check(dataBefore.equals(fixtureMarker(context)),"private app data changed");
-            android.util.Log.i("SNMPInstallerTest","PASS real Android sessions: fresh split install, base-only update, retained resource split SHA256 and app data");
+            android.util.Log.i("SNMPInstallerTest","PASS real Android sessions: full install and update, verified resource split SHA256 and app data");
         } finally { getUiAutomation().dropShellPermissionIdentity(); }
     }
 
@@ -130,7 +130,7 @@ public final class InstallerTests extends Instrumentation {
         throw new AssertionError("fixture provider not available after installation");
     }
 
-    int commit(Context context,String pkg,boolean full,List<File> files,ApkPatcher.Progress progress) throws Exception {
+    int commit(Context context,String pkg,List<File> files,ApkPatcher.Progress progress) throws Exception {
         String action=context.getPackageName()+".FIXTURE_RESULT."+System.nanoTime();
         CountDownLatch latch=new CountDownLatch(1); int[] status={-999};
         BroadcastReceiver receiver=new BroadcastReceiver(){ public void onReceive(Context c,Intent intent) {
@@ -140,7 +140,7 @@ public final class InstallerTests extends Instrumentation {
         PackageInstaller installer=context.getPackageManager().getPackageInstaller();
         int id=-1;
         try {
-            id=SessionWriter.stage(context,pkg,full,files,progress);
+            id=SessionWriter.stage(context,pkg,files,progress);
             Intent callback=new Intent(action).setPackage(context.getPackageName());
             int mutable=android.os.Build.VERSION.SDK_INT>=31?0x02000000:0;
             PendingIntent result=PendingIntent.getBroadcast(context,id,callback,PendingIntent.FLAG_UPDATE_CURRENT|mutable);

@@ -113,6 +113,32 @@ struct Authority {
         if(applied){if(request.deposit)items.emplace(request.item.id,request.item);else items.erase(request.item.id);r.revision=++revision;}
         reserved=false;pending={};replies.emplace(key,r);return r;
     }
+    bool record_consumption(const std::string& locker,const std::vector<Item>& remaining,
+                            std::vector<Message>* deltas) {
+        if(reserved||!id_valid(locker))return false;
+        Authority actual;
+        if(!actual.initialize(remaining)||actual.items.size()>items.size())return false;
+        for(const auto& entry:actual.items) {
+            auto previous=items.find(entry.first);
+            if(previous==items.end()||previous->second.tech!=entry.second.tech)return false;
+        }
+        if(UINT64_MAX-revision<items.size()-actual.items.size())return false;
+        std::vector<Message> updates;
+        auto next_revision=revision;
+        for(const auto& entry:items) {
+            if(actual.items.count(entry.first))continue;
+            Message delta;
+            delta.kind=Done;
+            delta.locker=locker;
+            delta.revision=++next_revision;
+            delta.item={entry.first,entry.second.tech,{}};
+            updates.push_back(std::move(delta));
+        }
+        for(const auto& delta:updates)items.erase(delta.item.id);
+        revision=next_revision;
+        *deltas=std::move(updates);
+        return true;
+    }
 };
 
 // Carried inside the ordered WorldEvent stream. Bounded, strict fragments;

@@ -49,6 +49,7 @@ public final class PatchService extends Service {
                     File report=Diagnostics.create(this,intent.getStringExtra("category"),intent.getStringExtra("description"),true);
                     status(this,"Диагностический ZIP готов. Нажмите «Отправить ZIP» или «Сохранить диагностический ZIP». Получите такой же отчёт со второго телефона при проблеме синхронизации.");
                 } else if ("install".equals(action)) install(engine, progress);
+                else if ("recover-assets".equals(action)) recoverAssets(engine, intent.getData(), progress);
                 else if("recover-game".equals(action)) {
                     if(engine.installed()!=null || engine.retained()==null) throw new IOException("Восстановление регистрации игры сейчас не требуется");
                     SaveManager worlds=new SaveManager(this);
@@ -121,11 +122,32 @@ public final class PatchService extends Service {
         blocker = engine.installBlocker(plan); if (blocker != null) throw new IOException(blocker);
         // If a migration backup exists, verify it before installing into the now-absent game slot.
         if(engine.installed()==null && new SaveManager(this).latest()!=null) new SaveManager(this).verify();
+        commitInstall(files, false, progress);
+    }
+
+    void recoverAssets(PatchEngine engine, android.net.Uri source, ApkPatcher.Progress progress) throws Exception {
+        if (!getPackageManager().canRequestPackageInstalls()) throw new IOException("Разрешите установку из этого приложения");
+        File input = File.createTempFile("assets-input-", ".apk", getCacheDir());
+        File signed = new File(getCacheDir(), input.getName() + ".signed.apk");
+        try {
+            progress.update("Чтение пакета ресурсов", 0, 0);
+            File base = engine.prepareAssetsRecovery(source, input, signed, progress);
+            // Submit the complete pair together so the system confirmation cannot
+            // replace the game with a base-only APK during resource recovery.
+            commitInstall(java.util.Arrays.asList(base, signed), true, progress);
+        } finally {
+            input.delete();
+            signed.delete();
+        }
+    }
+
+    void commitInstall(List<File> files, boolean assetsOnly, ApkPatcher.Progress progress) throws Exception {
         PackageInstaller installer = getPackageManager().getPackageInstaller();
-        int id = SessionWriter.stage(this, PatchEngine.GAME, plan.getBoolean("full"), files, progress);
+        int id = SessionWriter.stage(this, PatchEngine.GAME, files, progress);
         boolean committed = false;
         try (PackageInstaller.Session session = installer.openSession(id)) {
-            Intent callback = new Intent(this, InstallReceiver.class).setAction(getPackageName() + ".INSTALL_RESULT");
+            Intent callback = new Intent(this, InstallReceiver.class).setAction(getPackageName() + ".INSTALL_RESULT")
+                .putExtra("assetsOnly", assetsOnly);
             int mutable = Build.VERSION.SDK_INT >= 31 ? 0x02000000 : 0;
             PendingIntent result = PendingIntent.getBroadcast(this, id, callback, PendingIntent.FLAG_UPDATE_CURRENT | mutable);
             getSharedPreferences("status", 0).edit().putInt("session", id).commit();

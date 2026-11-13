@@ -1050,7 +1050,8 @@ void build_pump_jobs() {
             if (!geometry) { j.next_try = now + kBuildJobRetrySeconds; continue; }
             void* target = build_corridor_target(geometry->target_base_id, geometry->target_base_anchor);
             if (!target) { j.next_try = now + kBuildJobRetrySeconds; continue; }
-            const bool done=j.state.tech_type==5504 ? build_apply_ladder(target,j.state,*geometry) : base_geometry::face_type_for_tech(j.state.tech_type)>=0 ? build_apply_hatch(target,j.state,*geometry) :
+            const bool done=j.state.tech_type==base_geometry::kBioreactorTech ? build_apply_bioreactor(target,j.state,*geometry) :
+                j.state.tech_type==5504 ? build_apply_ladder(target,j.state,*geometry) : base_geometry::face_type_for_tech(j.state.tech_type)>=0 ? build_apply_hatch(target,j.state,*geometry) :
                 build_apply_corridor_removal(target, j.state, *geometry);
             if (done) build_finish_job(j);
             else j.next_try = now + kBuildJobRetrySeconds;
@@ -1073,10 +1074,29 @@ void build_pump_jobs() {
         if (anchored && base_geometry::face_type_for_tech(j.state.tech_type)>=0) {
             const uint64_t fingerprint=uint64_t(j.state.geometry_hash_low) | (uint64_t(j.state.geometry_hash_high)<<32);
             const auto* geometry=g_geometry_cache.find(j.state.origin_id,j.state.object_id,fingerprint,now);
-            if (!geometry) { j.next_try=now+kBuildJobRetrySeconds; continue; }
+            if (!geometry) {
+                static double next_miss=0;
+                if (now>=next_miss) {
+                    next_miss=now+kBuildJobRetrySeconds*5;
+                    LOG_WARN("build: geometry miss id=%s origin=%08x hash=%016llx",j.state.object_id,
+                             j.state.origin_id,static_cast<unsigned long long>(fingerprint));
+                }
+                j.next_try=now+kBuildJobRetrySeconds; continue;
+            }
             void* target=build_corridor_target(geometry->target_base_id,geometry->target_base_anchor);
-            if (!target) { j.next_try=now+kBuildJobRetrySeconds; continue; }
-            if (build_apply_hatch(target,j.state,*geometry)) build_finish_job(j);
+            if (!target) {
+                static double next_no_target=0;
+                if (now>=next_no_target) {
+                    next_no_target=now+kBuildJobRetrySeconds*5;
+                    LOG_WARN("build: target absent id=%s base=%s anchor=(%d,%d,%d) tech=%d",j.state.object_id,
+                             geometry->target_base_id.c_str(),geometry->target_base_anchor[0],
+                             geometry->target_base_anchor[1],geometry->target_base_anchor[2],j.state.tech_type);
+                }
+                j.next_try=now+kBuildJobRetrySeconds; continue;
+            }
+            const bool done=j.state.tech_type==base_geometry::kBioreactorTech ?
+                build_apply_bioreactor(target,j.state,*geometry) : build_apply_hatch(target,j.state,*geometry);
+            if (done) build_finish_job(j);
             else j.next_try=now+kBuildJobRetrySeconds;
             continue;
         }
@@ -1247,6 +1267,9 @@ void tick_build_sync(void* /*player*/, const LocalState& local) {
         g_build_baseline = false;
         return;
     }
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    build_publish_saved_bioreactors();
+#endif
     void* list = g_find_objects_all.call(g_build_type, true, g_find_objects_all.method);
     if (!list) return;
     void* ghost = g_build_ghost.call(g_build_ghost.method);

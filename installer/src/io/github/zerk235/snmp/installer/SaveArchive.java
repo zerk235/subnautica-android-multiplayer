@@ -131,7 +131,9 @@ final class SaveArchive {
         return manifest;
     }
 
-    static JSONObject restore(InputStream input,File saves) throws Exception {
+    interface RestoreAccess { void prepare(File staging) throws Exception; }
+
+    static JSONObject restore(InputStream input,File saves,RestoreAccess access) throws Exception {
         File parent=saves.getParentFile();
         if(!parent.isDirectory()) throw new IOException("Сначала один раз откройте установленную игру до меню и закройте её");
         String id=UUID.randomUUID().toString();
@@ -140,6 +142,7 @@ final class SaveArchive {
         try {
             JSONObject expected=inspect(input,staging);
             if(!same(expected,inventory(staging))) throw new IOException("Записанные файлы не прошли проверку");
+            access.prepare(staging);
             if(saves.exists()) {
                 if(!OsConstants.S_ISDIR(Os.lstat(saves.getAbsolutePath()).st_mode)) throw new IOException("Неверная папка сохранений");
                 if(!saves.renameTo(previous)) throw new IOException("Не удалось оставить прежние миры в резервной папке");
@@ -158,5 +161,25 @@ final class SaveArchive {
                 throw new IOException("Не удалось вернуть прежнюю папку. Она сохранена: "+previous.getName());
             // Failed staging and previous worlds are retained, never deleted here.
         }
+    }
+
+    static void prepareGameAccess(File entry,int gameUid,int gameGid,boolean root) throws Exception {
+        String path=entry.getAbsolutePath();
+        StructStat stat=Os.lstat(path);
+        boolean directory=OsConstants.S_ISDIR(stat.st_mode);
+        if(!directory && !OsConstants.S_ISREG(stat.st_mode)) throw new IOException("Неверный файл в восстановленной копии");
+        if(directory) {
+            File[] children=entry.listFiles();
+            if(children==null) throw new IOException("Не удалось проверить права папки мира");
+            for(File child:children) prepareGameAccess(child,gameUid,gameGid,root);
+        }
+        // Without CAP_CHOWN, grant the game access through the mode bits. Android's
+        // app-specific external storage still mediates access to this package's directory.
+        int mode=root ? (directory?02770:0660) : (directory?0777:0666);
+        if(root) Os.chown(path,gameUid,gameGid);
+        Os.chmod(path,mode);
+        StructStat checked=Os.lstat(path);
+        if((checked.st_mode & 0777)!=(mode & 0777) || (root && (checked.st_uid!=gameUid || checked.st_gid!=gameGid)))
+            throw new IOException("Android не применил права доступа игры к восстановленному миру");
     }
 }

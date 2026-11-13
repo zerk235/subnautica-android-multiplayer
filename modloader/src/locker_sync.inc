@@ -55,6 +55,8 @@ void* build_locker_storage(void* go,bool require_container) {
 
 #include "solar_panel.inc"
 #include "fabricator_sync.inc"
+struct LockerRemoteScope {int prior=g_applying_remote;LockerRemoteScope(){++g_applying_remote;}~LockerRemoteScope(){g_applying_remote=prior;}};
+#include "bioreactor_sync.inc"
 
 bool build_attached_components(void* go,int tech,bool require_ready) {
     switch(tech) {
@@ -107,11 +109,6 @@ bool build_attached_capture(void* c,WorldEvent* out) {
     out->constructed_amount=1.0f;out->kind=kWorldEventBuild;
     return build_class_bytes(g_build_class_id.call(out->tech_type,g_build_class_id.method),out->class_id)&&
         interior_build::payload_valid(*out);
-}
-
-// Contents code must continue to accept only a floor locker, never a power source.
-bool build_locker_capture(void* c,WorldEvent* out) {
-    return build_attached_capture(c,out)&&out->tech_type==interior_build::kLocker;
 }
 
 void build_locker_queue(WorldEvent state,uint8_t kind) {
@@ -200,7 +197,6 @@ void* build_locker_parent(const WorldEvent& e) {
     }
     return found;
 }
-struct LockerRemoteScope {int prior=g_applying_remote;LockerRemoteScope(){++g_applying_remote;}~LockerRemoteScope(){g_applying_remote=prior;}};
 
 bool build_apply_locker(const WorldEvent& e) {
     const bool locker=e.tech_type==interior_build::kLocker;

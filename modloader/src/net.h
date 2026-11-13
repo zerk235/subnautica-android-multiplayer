@@ -23,7 +23,7 @@ constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 31;  // exact-base Fabricator completion and demolition
+constexpr uint16_t kSessionProtocolVersion = 33;  // Native base-face Bioreactor and shared fuel
 #else
 constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
 #endif
@@ -276,6 +276,13 @@ WorldHandoffState net_world_handoff_state();
 void net_world_handoff_slot(char* out, size_t capacity);
 void net_world_handoff_detail(char* out, size_t capacity);
 void net_world_handoff_clear();
+
+enum class WorldNotice {
+    HostFound, GuestFound, Sending, Receiving, Received, Sent, ReceiveFailed, SendFailed
+};
+
+// Game-thread consumer. Network callbacks never call Unity.
+bool net_take_world_notice(WorldNotice* notice);
 
 // ---------------------------------------------------------------------------
 // Slot auto-load request

@@ -17,7 +17,7 @@ public final class SaveTests extends Instrumentation {
     static void put(File file,String data) throws Exception { file.getParentFile().mkdirs(); PatchEngine.write(file,data.getBytes(StandardCharsets.UTF_8)); }
     static void reject(File archive,File target) throws Exception {
         boolean refused=false;
-        try { SaveArchive.restore(new FileInputStream(archive),target); } catch(Exception expected) { refused=true; }
+        try { SaveArchive.restore(new FileInputStream(archive),target,staging->{}); } catch(Exception expected) { refused=true; }
         check(refused,"unsafe archive accepted");
     }
     public void onStart() {
@@ -37,8 +37,16 @@ public final class SaveTests extends Instrumentation {
             check(SaveArchive.same(before,SaveArchive.inspect(new FileInputStream(zip),null)),"backup inventory");
             File parent=new File(dir,"target"); parent.mkdir(); File target=new File(parent,"SavedGames");
             put(new File(target,"old-world/data"),"old progress");
-            JSONObject report=SaveArchive.restore(new FileInputStream(zip),target);
+            boolean denied=false;
+            try {
+                SaveArchive.restore(new FileInputStream(zip),target,staging->{ throw new IOException("test access failure"); });
+            } catch(IOException expected) { denied=expected.getMessage().equals("test access failure"); }
+            check(denied && new File(target,"old-world/data").isFile(),"access failure replaced existing worlds");
+            JSONObject report=SaveArchive.restore(new FileInputStream(zip),target,
+                staging->SaveArchive.prepareGameAccess(staging,-1,-1,false));
             check(report.getInt("files")==4 && SaveArchive.same(before,SaveArchive.inventory(target)),"restored data");
+            check((Os.stat(target.getAbsolutePath()).st_mode & 0777)==0777,"shell restore directory mode");
+            check((Os.stat(new File(target,"slotA/CellsCache/cell.zip").getAbsolutePath()).st_mode & 0777)==0666,"shell restore file mode");
             check(new File(parent,report.getString("previous")+"/old-world/data").isFile(),"previous worlds not retained");
             String prior=ApkPatcher.sha256(new File(target,"slotA/gameinfo.json"));
             File corrupt=new File(dir,"corrupt.zip");

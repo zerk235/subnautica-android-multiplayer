@@ -7,11 +7,10 @@ import java.util.List;
 
 /** Shared by the production install path and disposable fixture tests. */
 final class SessionWriter {
-    static int stage(Context context, String packageName, boolean full, List<File> files,
+    static int stage(Context context, String packageName, List<File> files,
                      ApkPatcher.Progress progress) throws Exception {
         PackageInstaller installer=context.getPackageManager().getPackageInstaller();
-        PackageInstaller.SessionParams params=new PackageInstaller.SessionParams(full
-            ? PackageInstaller.SessionParams.MODE_FULL_INSTALL : PackageInstaller.SessionParams.MODE_INHERIT_EXISTING);
+        PackageInstaller.SessionParams params=new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
         params.setAppPackageName(packageName);
         long total=0; for(File file:files) total=Math.addExact(total,file.length()); params.setSize(total);
         if(new android.os.StatFs(context.getFilesDir().getPath()).getAvailableBytes()<total+64L*1024*1024)

@@ -2,6 +2,9 @@ package io.github.zerk235.snmp.installer;
 
 import android.content.Context;
 import android.os.*;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
 import org.json.JSONObject;
 import java.io.*;
 
@@ -9,7 +12,7 @@ import java.io.*;
 public final class SaveAccessService extends Binder {
     static final String DESCRIPTOR="io.github.zerk235.snmp.installer.SaveAccess.v1";
     static final int SNAPSHOT=1, CHECK=2, RESTORE=3, CHECK_REMOVAL=4, CHECK_PROFILES=5, DIAGNOSTICS=6,
-        PROFILE_STATE=7, RECOVER_GAME=8;
+        PROFILE_STATE=7, RECOVER_GAME=8, CHECK_ACCESS=9;
     final int owner;
     final File saves;
     public SaveAccessService(Context context) {
@@ -25,7 +28,9 @@ public final class SaveAccessService extends Binder {
         data.enforceInterface(DESCRIPTOR);
         try {
             JSONObject result;
-            if(code==PROFILE_STATE) {
+            if(code==CHECK_ACCESS) {
+                result=new JSONObject().put("callerUid",caller);
+            } else if(code==PROFILE_STATE) {
                 result=profiles().json(owner/100000);
             } else if(code==RECOVER_GAME) {
                 int user=owner/100000;
@@ -65,9 +70,15 @@ public final class SaveAccessService extends Binder {
                 // Fixed argv, never a caller-provided shell command.
                 stopGame();
                 File parent=saves.getParentFile();
-                if(!parent.isDirectory() && !parent.mkdirs()) throw new IOException("Не удалось создать папку установленной игры");
+                if(!parent.isDirectory()) throw new IOException("Сначала один раз откройте установленную игру до меню и закройте её");
+                StructStat gameFiles=Os.lstat(parent.getAbsolutePath());
+                if(!OsConstants.S_ISDIR(gameFiles.st_mode)) throw new IOException("Неверная папка установленной игры");
+                boolean root=android.os.Process.myUid()==0;
+                if(root && (gameFiles.st_uid/100000!=owner/100000 || gameFiles.st_uid%100000<10000))
+                    throw new IOException("Не удалось определить владельца папки игры. Откройте игру до меню и закройте её");
                 try(ParcelFileDescriptor fd=ParcelFileDescriptor.CREATOR.createFromParcel(data)) {
-                    result=SaveArchive.restore(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),saves);
+                    result=SaveArchive.restore(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),saves,
+                        staging->SaveArchive.prepareGameAccess(staging,gameFiles.st_uid,gameFiles.st_gid,root));
                 }
             } else return super.onTransact(code,data,reply,flags);
             reply.writeNoException(); reply.writeInt(1); reply.writeString(result.put("serviceUid",android.os.Process.myUid()).toString());

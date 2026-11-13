@@ -1,9 +1,13 @@
 using HatchSetFaceFn=void (*)(void*,HatchFace,uint8_t,void*);
 using HatchCanFaceFn=uint8_t (*)(void*,HatchFace,uint8_t,void*);
+// Base.CanSetModule(ref Base.Face, FaceType) takes the face by reference: the game may
+// rewrite it (dump.cs 5984). Passing a copy would silently validate a different face.
+using HatchCanModuleFn=uint8_t (*)(void*,HatchFace*,uint8_t,void*);
 struct HatchApplyApi {
     bool ready=false,failed=false;
     Entry<HatchSetFaceFn> set_face,clear_face;
     Entry<HatchCanFaceFn> can_set;
+    Entry<HatchCanModuleFn> can_module;
 };
 HatchApplyApi g_hatch_apply;
 bool build_resolve_hatch_apply() {
@@ -14,8 +18,11 @@ bool build_resolve_hatch_apply() {
     a.set_face.bind(find_method(cls,"SetFaceType",2));
     a.clear_face.bind(find_method(cls,"ClearFace",2));
     a.can_set.bind(find_method(cls,"CanSetFace",2));
+    // Optional: only wall modules use it, so it must not gate the room-face path.
+    a.can_module.bind(find_method(cls,"CanSetModule",2));
     a.ready=a.set_face && a.clear_face && a.can_set;
-    LOG_INFO("build: structural face API %s",a.ready ? "ready" : "unavailable");
+    LOG_INFO("build: structural face API %s (module=%u)",a.ready ? "ready" : "unavailable",
+             unsigned(a.can_module ? 1 : 0));
     return a.ready;
 }
 bool build_hatch_removal_allowed(void* target,HatchFace face,int32_t tech) {

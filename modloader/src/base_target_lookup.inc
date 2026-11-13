@@ -108,7 +108,30 @@ void* build_corridor_target(const std::string& expected_id, const std::array<int
             LOG_INFO("build: target anchor deferred id=%s actual=(%d,%d,%d) expected=(%d,%d,%d)",id,anchor[0],anchor[1],anchor[2],expected_anchor[0],expected_anchor[1],expected_anchor[2]);
         }
     }
-    if (!found || (require_anchor && !anchor_matches)) return nullptr;
+    if (!found || (require_anchor && !anchor_matches)) {
+        // A silent miss here stalls every anchored replay: report what the world holds.
+        if (!found && build_now()>=next_report) {
+            next_report=build_now()+5;
+            char ids[256]="";
+            int shown=0;
+            for (int32_t i=0;i<count&&shown<3;++i) {
+                void* candidate=g_array_get_value.call(list,i,g_array_get_value.method);
+                if (!build_live(candidate)) { ++shown; continue; }
+                void* uid=build_uid(candidate);
+                char actual[kWorldEventObjectIdSize]{};
+                const bool have=uid&&string_to_ascii(g_unique_get_id.call(uid,g_unique_get_id.method),actual,sizeof(actual));
+                bool is_ghost=false,is_placed=false;
+                il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate),g_corridor_api.base_is_ghost,&is_ghost);
+                il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(candidate),g_corridor_api.base_is_placed,&is_placed);
+                char one[96];
+                snprintf(one,sizeof(one),"%s(g%u p%u) ",have?actual:"<noid>",unsigned(is_ghost),unsigned(is_placed));
+                strncat(ids,one,sizeof(ids)-strlen(ids)-1);
+                ++shown;
+            }
+            LOG_WARN("build: target missing id=%s bases=%d first=%s",expected_id.c_str(),count,ids);
+        }
+        return nullptr;
+    }
     void* current_ghost = nullptr;
     il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(found), g_corridor_api.placement_ghost,
                            &current_ghost);

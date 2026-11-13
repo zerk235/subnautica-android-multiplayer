@@ -28,7 +28,7 @@ final class SaveBridge implements AutoCloseable {
         locked=true;
         CountDownLatch ready=new CountDownLatch(1);
         args=new Shizuku.UserServiceArgs(new ComponentName(context,SaveAccessService.class))
-            .tag("snmp-save-backup-v1").version(4).daemon(false).processNameSuffix("save_access");
+            .tag("snmp-save-backup-"+android.os.Process.myUid()).version(5).daemon(false).processNameSuffix("save_access");
         connection=new ServiceConnection() {
             public void onServiceConnected(ComponentName name,IBinder service) { binder=service; ready.countDown(); }
             public void onServiceDisconnected(ComponentName name) { binder=null; }
@@ -36,6 +36,8 @@ final class SaveBridge implements AutoCloseable {
         try {
             Shizuku.bindUserService(args,connection);
             if(!ready.await(20,TimeUnit.SECONDS) || binder==null) throw new IOException("Не удалось подключить службу копирования Shizuku");
+            if(transact(SaveAccessService.CHECK_ACCESS,null).getInt("callerUid")!=android.os.Process.myUid())
+                throw new IOException("Shizuku подключил службу другого профиля Android");
         } catch(Exception error) { close(); throw error; }
     }
     JSONObject call(int operation,File archive,boolean write) throws Exception {

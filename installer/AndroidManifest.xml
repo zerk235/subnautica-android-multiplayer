@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.github.zerk235.snmp.installer" android:versionCode="11" android:versionName="0.3.8-preview">
+    package="io.github.zerk235.snmp.installer" android:versionCode="12" android:versionName="0.3.9-preview">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="29" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
@@ -9,7 +9,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <queries><package android:name="com.unknownworlds.subnautica" /><package android:name="moe.shizuku.privileged.api" /></queries>
-    <application android:name=".InstallerApplication" android:label="SN Multiplayer Installer" android:theme="@android:style/Theme.Material.NoActionBar"
+    <application android:name=".InstallerApplication" android:label="SN Multiplayer Installer"
+        android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false" android:supportsRtl="true" android:usesCleartextTraffic="false">
         <meta-data android:name="moe.shizuku.client.V3_SUPPORT" android:value="true" />
         <provider android:name="rikka.shizuku.ShizukuProvider"

@@ -233,7 +233,7 @@ int main() {
         bad=face; bad.geometry.glass[0]=1; assert(face_direction(bad,tech)<0);
         bad=face; bad.geometry.masks[0]=0; assert(face_direction(bad,tech)<0);
     }
-    for (int unsupported:{5500,5504,5515,5522,5528,5529,5542}) {
+    for (int unsupported:{5500,5504,5515,5522,5529,5542}) {
         auto face=face_descriptor(envelope,{5,0,2},0,unsupported);
         assert(face_type_for_tech(unsupported)<0 && face_direction(face,unsupported)<0);
     }

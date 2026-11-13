@@ -37,6 +37,23 @@ namespace {
 
 constexpr uint32_t kMagic = 0x534E4D31;  // "SNM1"
 
+constexpr size_t kWorldNoticeCapacity = 8;
+pthread_mutex_t g_world_notice_lock = PTHREAD_MUTEX_INITIALIZER;
+WorldNotice g_world_notices[kWorldNoticeCapacity];
+size_t g_world_notice_head = 0;
+size_t g_world_notice_count = 0;
+
+void push_world_notice(WorldNotice notice) {
+    pthread_mutex_lock(&g_world_notice_lock);
+    if (g_world_notice_count == kWorldNoticeCapacity) {
+        g_world_notice_head = (g_world_notice_head + 1) % kWorldNoticeCapacity;
+        --g_world_notice_count;
+    }
+    g_world_notices[(g_world_notice_head + g_world_notice_count) % kWorldNoticeCapacity] = notice;
+    ++g_world_notice_count;
+    pthread_mutex_unlock(&g_world_notice_lock);
+}
+
 // Fills the pump-thread call sites above LocalSession with a forward entry point; the
 // definition lands next to g_session, where the session struct is complete.
 void rebuild_offer_from_disk();
@@ -759,10 +776,16 @@ bool locate_chunk(const WorldGuest& guest, uint32_t ordinal, int* out_file, uint
 // is the only producer: a complete guest slot hands itself to the game thread here.
 void set_handoff(WorldHandoffState state, const char* slot, const char* detail) {
     pthread_mutex_lock(&g_handoff_lock);
+    const auto previous = g_handoff_state;
     g_handoff_state = state;
     snprintf(g_handoff_slot, sizeof(g_handoff_slot), "%s", slot ? slot : "");
     snprintf(g_handoff_detail, sizeof(g_handoff_detail), "%s", detail ? detail : "");
     pthread_mutex_unlock(&g_handoff_lock);
+    if (previous != state) {
+        if (state == kWorldHandoffReceiving) push_world_notice(WorldNotice::Receiving);
+        if (state == kWorldHandoffWritten) push_world_notice(WorldNotice::Received);
+        if (state == kWorldHandoffFailed) push_world_notice(WorldNotice::ReceiveFailed);
+    }
     // Every Written comes out of the guest receive handler, which set g_receive_generation
     // before completing, so it is the generation this slot was transferred for. The game
     // thread decides what to do with the request; the pump only records that a complete
@@ -921,6 +944,7 @@ void pump_guest(WorldGuest& guest, double now) {
         guest.acked = 0;
         guest.sent_upto = 0;
         send_manifest(guest);
+        push_world_notice(WorldNotice::Sending);
         LOG_INFO("world: offering slot %s to %08x (gen %llu), %zu bytes in %u chunks",
                  guest.slot, guest.id, (unsigned long long)generation, total_bytes,
                  guest.total_chunks);
@@ -1935,6 +1959,7 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
         // here is to stop sending: verifying on this side would read buffers that were never
         // allocated on this side.
         guest->finished = true;
+        push_world_notice(WorldNotice::Sent);
         LOG_INFO("world: guest %08x confirmed slot %s is on its disk", guest->id, guest->slot);
         release_guest(guest);
         return;
@@ -2211,6 +2236,7 @@ void handle_join_request_locked(const uint8_t* data, size_t size,
         pthread_mutex_unlock(&g_session.lock);
         LOG_INFO("session: accepted JOIN from %08x nonce=%llu",
                  request.sender_id, static_cast<unsigned long long>(request.request_nonce));
+        push_world_notice(WorldNotice::GuestFound);
     } else {
         if (reserved_guest) release_guest(reserved_guest);
         LOG_WARN("session: JOIN from %08x refused status=%u (host_available=%d "
@@ -2712,6 +2738,7 @@ void session_auto_join_tick(double now) {
         g_session.join_started = now;
         g_session.reason = kJoinAccepted;
         session_set_state_locked(kSessionJoinPending, kJoinAccepted, "auto-join visible host");
+        push_world_notice(WorldNotice::HostFound);
         LOG_INFO("session: auto-joining host %08x (no UI yet; explicit join overrides)",
                  best_host);
     }
@@ -3111,6 +3138,8 @@ void* pump_main(void* unused) {
             if (!g_guests[i].active) continue;
             if (now - g_guests[i].last_activity > kGuestIdleSeconds) {
                 LOG_INFO("world: releasing idle guest %08x", g_guests[i].id);
+                if (g_guests[i].total_chunks && !g_guests[i].finished)
+                    push_world_notice(WorldNotice::SendFailed);
                 release_guest(&g_guests[i]);
                 continue;
             }
@@ -3571,6 +3600,7 @@ bool net_session_join(uint32_t host_id, const uint8_t session_id[16]) {
     g_session.join_started = monotonic_seconds();
     g_session.reason = kJoinAccepted;
     session_set_state_locked(kSessionJoinPending, kJoinAccepted, "join request pending");
+    push_world_notice(WorldNotice::HostFound);
     pthread_mutex_unlock(&g_session.lock);
     return true;
 }
@@ -3732,3 +3762,15 @@ void net_world_handoff_detail(char* out, size_t capacity) {
 }
 
 void net_world_handoff_clear() { set_handoff(kWorldHandoffIdle, "", ""); }
+
+bool net_take_world_notice(WorldNotice* notice) {
+    if (!notice || pthread_mutex_trylock(&g_world_notice_lock) != 0) return false;
+    const bool available = g_world_notice_count != 0;
+    if (available) {
+        *notice = g_world_notices[g_world_notice_head];
+        g_world_notice_head = (g_world_notice_head + 1) % kWorldNoticeCapacity;
+        --g_world_notice_count;
+    }
+    pthread_mutex_unlock(&g_world_notice_lock);
+    return available;
+}

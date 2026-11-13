@@ -20,7 +20,13 @@ public final class InstallReceiver extends BroadcastReceiver {
             context.getSharedPreferences("status", 0).edit().remove("session").apply();
             final PendingResult pendingResult=goAsync();
             new Thread(()->{ try {
-                PatchEngine engine=new PatchEngine(context); engine.verifyInstalled(engine.plan());
+                PatchEngine engine=new PatchEngine(context);
+                if (result.getBooleanExtra("assetsOnly", false)) {
+                    engine.verifyAssetsInstalled(engine.installed());
+                    PatchService.status(context,"Пакет ресурсов восстановлен. Можно открыть Subnautica.");
+                    return;
+                }
+                engine.verifyInstalled(engine.plan());
                 Diagnostics.event(context,"installed_game_verified","current profile, version, certificate and native SHA256 verified");
                 PatchService.status(context,new SaveManager(context).needsRestore()
                     ? "Мод установлен. Теперь нажмите «Восстановить миры», прежде чем открывать игру."

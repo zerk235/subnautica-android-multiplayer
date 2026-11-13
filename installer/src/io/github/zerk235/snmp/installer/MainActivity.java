@@ -43,11 +43,15 @@ public final class MainActivity extends Activity {
     TextView tabIcons[], tabLabels[];
 
     JSONObject profileState;
+    Button recoverAssets;
     String profileError;
     boolean profilePending;
     long profileCheckedAt;
     String removalToken;
-    final Shizuku.OnRequestPermissionResultListener permissionResult=(request,result)->render();
+    final Shizuku.OnRequestPermissionResultListener permissionResult=(request,result)->{
+        profileCheckedAt=0;
+        render();
+    };
     final Handler handler = new Handler(Looper.getMainLooper());
     final Runnable refresh = new Runnable() { public void run() { render(); handler.postDelayed(this, 1000); } };
 
@@ -311,6 +315,17 @@ public final class MainActivity extends Activity {
             } catch (Exception e) { showError("install-check", e); }
         });
         body.addView(install);
+        recoverAssets = Ui.button(this, "Восстановить пакет ресурсов", 1);
+        recoverAssets.setVisibility(View.GONE);
+        recoverAssets.setOnClickListener(v -> {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                return;
+            }
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*"), 705);
+        });
+        body.addView(recoverAssets);
         body.addView(gap(8));
         cancel = Ui.button(this, "Отменить ожидающую установку Android", 1);
         cancel.setOnClickListener(v -> {
@@ -333,7 +348,10 @@ public final class MainActivity extends Activity {
             case 0: connectShizuku(); break;
             case 1: confirmBackup(); break;
             case 2: confirmPrepare(); break;
-            case 3: confirmReplace(); break;
+            case 3:
+                if (install.isEnabled()) install.performClick();
+                else if (remove.isEnabled()) confirmReplace();
+                break;
             case 4: launchGame("auto"); break;
         }
     }
@@ -483,7 +501,11 @@ public final class MainActivity extends Activity {
                 if (launch != null) startActivity(launch);
                 else startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/")));
             } else if (Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) Shizuku.requestPermission(701);
-            else alert("Доступ Shizuku предоставлен. Сохранитесь, выйдите в главное меню игры и создайте копию миров.");
+            else {
+                profileCheckedAt=0;
+                refreshProfiles();
+                alert("Проверяем связь со службой Shizuku. Результат появится на вкладке «Миры».");
+            }
         } catch (Exception error) { showError("shizuku-connect", error); }
     }
 
@@ -528,6 +550,12 @@ public final class MainActivity extends Activity {
     }
 
     void launchGame(String role) {
+        try {
+            if (!PatchEngine.hasAssets(new PatchEngine(this).installed())) {
+                alert("В игре отсутствует пакет ресурсов. Откройте вкладку «Установка» и нажмите «Восстановить пакет ресурсов».");
+                return;
+            }
+        } catch (Exception e) { showError("launch-" + role, e); return; }
         Intent intent = getPackageManager().getLaunchIntentForPackage(PatchEngine.GAME);
         if (intent == null) { showError("launch-" + role, new IOException("Игра пока не установлена")); return; }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
@@ -600,6 +628,15 @@ public final class MainActivity extends Activity {
 
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 705) {
+            if (result == RESULT_OK && data != null && data.getData() != null) {
+                try {
+                    startForegroundService(new Intent(this, PatchService.class).setAction("recover-assets")
+                        .setData(data.getData()).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
+                } catch (Exception error) { showError("recover-assets", error); }
+            }
+            return;
+        }
         if ((request != 702 && request != 703 && request != 704) || result != RESULT_OK || data == null || data.getData() == null) return;
         if (!PatchService.BUSY.compareAndSet(false, true)) { alert("Дождитесь текущей операции"); return; }
         Uri uri = data.getData();
@@ -659,10 +696,22 @@ public final class MainActivity extends Activity {
             try { plan = engine.plan(); }
             catch (Exception invalidPlan) { planError = invalidPlan.getMessage(); }
             int pending = PatchService.pendingSession(this);
+            boolean missingAssets = info != null && PatchEngine.GAME_VERSION.equals(info.versionName) && !PatchEngine.hasAssets(info);
+            recoverAssets.setVisibility(missingAssets ? View.VISIBLE : View.GONE);
+            recoverAssets.setEnabled(!busy && pending < 0);
             SaveManager worlds = new SaveManager(this); JSONObject saved = worlds.latest();
             if (info == null && saved != null && !getSharedPreferences("status", 0).getBoolean("restoreRequired", false))
                 getSharedPreferences("status", 0).edit().putBoolean("restoreRequired", true).apply();
             String access = SaveBridge.readiness(); boolean needsRestore = worlds.needsRestore();
+            if (access == null) {
+                if (!busy) refreshProfiles();
+                if (profileError != null) access = "Не удалось подтвердить доступ Shizuku: " + profileError;
+                else if (profileState == null || profileCheckedAt == 0) access = "Проверяем доступ к службе Shizuku…";
+            } else {
+                profileState = null;
+                profileError = null;
+                profileCheckedAt = 0;
+            }
             recoverGame.setVisibility(info == null && engine.retained() != null ? View.VISIBLE : View.GONE);
             recoverGame.setEnabled(!busy && pending < 0 && access == null);
             updateText(savesNote, (access == null ? "Shizuku: доступ предоставлен." : access) + "\n" + (saved == null ? "Проверенной копии миров пока нет." : "Копия: " + saved.getInt("files") + " файлов, " + (saved.getLong("bytes") / 1024) + " КиБ. " + (needsRestore ? "После замены игры нужно восстановление." : "Копия хранится отдельно от игры.")));
@@ -677,7 +726,6 @@ public final class MainActivity extends Activity {
             install.setEnabled(!busy && plan != null && engine.installBlocker(plan) == null && pending < 0);
             String blocker = engine.installBlocker(plan);
             boolean replacement = plan != null && engine.removalBlocker(plan) == null;
-            if (replacement && access == null && !busy) refreshProfiles();
             boolean onlyCurrent = profileState != null && profileState.optBoolean("currentInstalled")
                 && profileState.getJSONArray("installedUsers").length() == 1 && profileError == null
                 && SystemClock.elapsedRealtime() - profileCheckedAt < 15000;
@@ -694,6 +742,7 @@ public final class MainActivity extends Activity {
             launchHost.setEnabled(launchReady(info, needsRestore, busy));
             launchGuest.setEnabled(launchReady(info, needsRestore, busy));
             if (needsRestore) noteValue = "Мод установлен. Восстановите миры из проверенной копии перед запуском игры.";
+            if (missingAssets) noteValue = "Не найден пакет ресурсов игры. Нажмите «Восстановить пакет ресурсов» и выберите split_base_assets.apk.";
             updateText(note, noteValue);
             updateStatusChip(busy, needsRestore, info == null);
             updateSteps(access, saved, plan, needsRestore, launchReady(info, needsRestore, busy));
@@ -729,7 +778,7 @@ public final class MainActivity extends Activity {
         if (!android.text.TextUtils.equals(view.getText(), value)) view.setText(value);
     }
 
-    boolean launchReady(PackageInfo info, boolean needsRestore, boolean busy) { return !busy && info != null && !needsRestore; }
+    boolean launchReady(PackageInfo info, boolean needsRestore, boolean busy) { return !busy && PatchEngine.hasAssets(info) && !needsRestore; }
 
     void setEnabledStep(int index, boolean enabled) {
         stepRows[index].setEnabled(enabled);
@@ -773,7 +822,7 @@ public final class MainActivity extends Activity {
         new Thread(() -> {
             JSONObject state = null; String error = null;
             try (SaveBridge bridge = new SaveBridge(this)) { state = bridge.call(SaveAccessService.PROFILE_STATE, null, false); }
-            catch (Exception failure) { error = failure.getMessage(); }
+            catch (Exception failure) { error = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage(); }
             final JSONObject checked = state; final String problem = error;
             handler.post(() -> { profileState = checked; profileError = problem; profileCheckedAt = SystemClock.elapsedRealtime(); profilePending = false; });
         }, "snmp-profiles").start();

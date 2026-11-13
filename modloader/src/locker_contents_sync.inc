@@ -39,7 +39,7 @@ struct ContentsLocal {
     uint64_t revision=0;
     void* hand=nullptr;
     std::vector<lc::Item> manifest;
-    double next_query=0;
+    double next_query=0,next_reactor_refresh=0;
 };
 std::map<std::string,ContentsLocal> g_contents_lockers;
 struct ContentsPending {bool used=false,applied=false;lc::Message request;double next_send=0;} g_contents_pending;
@@ -50,6 +50,8 @@ std::map<uint32_t,lc::Assembly> g_contents_assembly;
 uint64_t g_contents_message=0,g_contents_request=0;
 uint8_t g_contents_session[16]{};uint32_t g_contents_epoch=0;
 bool g_contents_context=false;
+Entry<ManagedFn> g_reactor_update;
+bool g_reactor_update_installed=false;
 bool g_contents_journal_checked=false;
 struct ContentsLoad {
     bool active=false;lc::Message message;uint32_t origin=0;
@@ -107,11 +109,14 @@ bool contents_check_journals() {
     }
     closedir(dir);return clear;
 }
-bool contents_world_ready() {
-    if(!g_contents_context||!g_build_baseline||!g_role_known||g_world_live_since<=0||
+bool contents_world_live() {
+    if(!g_contents_context||!g_role_known||g_world_live_since<=0||
         build_now()-g_world_live_since<kReidSettleSeconds)return false;
     void* manager=g_slm_get_main?g_slm_get_main.call(nullptr,g_slm_get_main.method):nullptr;
     return manager&&g_slm_is_loading&&!g_slm_is_loading.call(manager,g_slm_is_loading.method);
+}
+bool contents_world_ready() {
+    return g_build_baseline&&contents_world_live();
 }
 struct ContentsScope {bool prior=g_contents_internal;ContentsScope(){g_contents_internal=true;}~ContentsScope(){g_contents_internal=prior;}};
 void* contents_field(void* object,void* field) {
@@ -122,23 +127,59 @@ bool contents_id(void* component,std::string* out) {
     if(!uid||!string_to_ascii(g_unique_get_id.call(uid,g_unique_get_id.method),id,sizeof(id))||!lc::id_valid(id))return false;
     *out=id;return true;
 }
-void* contents_locker(const std::string& id,void** constructable=nullptr) {
-    WorldEvent e{};snprintf(e.object_id,sizeof(e.object_id),"%s",id.c_str());
-    void* c=build_find(e);WorldEvent check{};
-    if(!c||!build_locker_capture(c,&check))return nullptr;
+int32_t contents_build_type(void* c) {
+    if(!c||il2cpp_object_get_class(reinterpret_cast<Il2CppObject*>(c))!=g_build_class)return 0;
     bool complete=false;il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(c),g_build_complete_field,&complete);
-    if(!complete)return nullptr;
-    if(constructable)*constructable=c;
+    if(!complete)return 0;
+    int32_t tech=0;il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(c),g_build_tech_field,&tech);
+    return tech;
+}
+void* contents_constructable(const std::string& id) {
+    WorldEvent e{};snprintf(e.object_id,sizeof(e.object_id),"%s",id.c_str());
+    return build_find(e);
+}
+void* contents_locker(const std::string& id) {
+    void* c=contents_constructable(id);WorldEvent check{};
+    if(contents_build_type(c)!=interior_build::kLocker||!build_attached_capture(c,&check))return nullptr;
     return build_locker_storage(g_get_game_object.call(c,g_get_game_object.method),true);
 }
-void* contents_container(const std::string& id) {
-    return contents_field(contents_locker(id),g_locker_api.container_field);
+void* contents_container(const std::string& id,bool* is_reactor=nullptr) {
+    if(is_reactor)*is_reactor=false;
+    const auto* build=build_synced_corridor(id.c_str());
+    if(build&&build->state.tech_type==base_geometry::kBioreactorTech&&!build->removal_applied) {
+        if(is_reactor)*is_reactor=true;
+        if(!g_reactor_update_installed||!build_bioreactor_resolve())return nullptr;
+        const auto& wire=build->geometry;
+        void* target=build_corridor_target(wire.target_base_id,wire.target_base_anchor);
+        base_geometry::GhostEnvelope geometry;
+        if(!target||!build_map_base_geometry(target,wire,&geometry))return nullptr;
+        const int direction=base_geometry::face_direction(geometry,base_geometry::kBioreactorTech);
+        if(direction<0)return nullptr;
+        const auto& cell=geometry.target_offset;
+        void* reactor=build_bioreactor_at(target,{{cell[0],cell[1],cell[2]},direction});
+        auto& api=g_bioreactor_api;
+        if(!build_live(contents_field(reactor,api.storage_root)))return nullptr;
+        return api.get_container.call(reactor,api.get_container.method);
+    }
+    void* c=contents_constructable(id);
+    if(contents_build_type(c)!=interior_build::kLocker)return nullptr;
+    WorldEvent check{};if(!build_attached_capture(c,&check))return nullptr;
+    void* go=g_get_game_object.call(c,g_get_game_object.method);
+    return contents_field(build_locker_storage(go,true),g_locker_api.container_field);
 }
 void* contents_inventory() {
     void* inv=read_static_object_field(g_inventory_class,"main");
     return inv?g_contents_api.inventory.call(inv,g_contents_api.inventory.method):nullptr;
 }
-bool contents_parent(void* container,std::string* id) {
+bool contents_reactor_id(void* reactor,std::string* id) {
+    base_geometry::GhostEnvelope geometry;
+    if(!build_bioreactor_descriptor(reactor,&geometry))return false;
+    const auto* entry=build_synced_face(geometry);
+    if(!entry||entry->state.tech_type!=base_geometry::kBioreactorTech)return false;
+    *id=entry->state.object_id;
+    return true;
+}
+bool contents_parent(void* container,std::string* id,bool* is_reactor=nullptr) {
     if(!container||il2cpp_object_get_class(reinterpret_cast<Il2CppObject*>(container))!=g_contents_api.items)return false;
     // Resolve the Transform property through its getter rather than treating an
     // ItemsContainer as a Unity Component.
@@ -147,12 +188,20 @@ bool contents_parent(void* container,std::string* id) {
     void* go=transform?g_get_game_object.call(transform,g_get_game_object.method):nullptr;
     bool found=false;
     walk_parents(go,[&](void* node){
+        if(g_bioreactor_api.ready) {
+            void* reactor=g_get_component.call(node,g_bioreactor_api.type,g_get_component.method);
+            if(build_live(reactor)&&contents_field(reactor,g_bioreactor_api.container)==container) {
+                if(is_reactor)*is_reactor=true;
+                found=contents_reactor_id(reactor,id);
+                return true;
+            }
+        }
         void* c=g_get_component.call(node,g_build_type,g_get_component.method);
-        WorldEvent check{};
-        if(!c||!build_locker_capture(c,&check))return false;
-        void* storage=build_locker_storage(node,true);
-        if(contents_field(storage,g_locker_api.container_field)!=container)return false;
-        *id=check.object_id;found=true;return true;
+        if(contents_build_type(c)!=interior_build::kLocker||
+           contents_field(build_locker_storage(node,true),g_locker_api.container_field)!=container)return false;
+        WorldEvent check{};if(!build_attached_capture(c,&check))return false;
+        *id=check.object_id;
+        found=true;return true;
     });return found;
 }
 struct ContentsNativeItem {lc::Item state;void* inventory_item=nullptr;void* pickup=nullptr;};
@@ -270,11 +319,19 @@ void contents_apply_grant(const lc::Message& grant) {
     contents_send(m);pending.next_send=build_now()+2;
 }
 uint8_t contents_add_hook(void* destination,void* item,void* method) {
-    if(g_contents_internal||!g_contents_api.ready||!contents_world_ready())return g_contents_add_original(destination,item,method);
+    if(g_contents_internal||!g_contents_api.ready||!contents_world_live())return g_contents_add_original(destination,item,method);
     void* source=contents_field(item,g_contents_api.item_owner);std::string from,to;
-    const bool source_locker=contents_parent(source,&from),destination_locker=contents_parent(destination,&to);
+    bool source_reactor=false,destination_reactor=false;
+    const bool source_locker=contents_parent(source,&from,&source_reactor);
+    const bool destination_locker=contents_parent(destination,&to,&destination_reactor);
+    if((source_reactor&&!source_locker)||(destination_reactor&&!destination_locker)) {
+        contents_notify("SNMP: синхронизация биореактора ещё не готова.");return 0;
+    }
     if(!source_locker&&!destination_locker)return g_contents_add_original(destination,item,method);
+    if(!g_build_baseline&&!(g_local_is_host&&(source_reactor||destination_reactor)))
+        return g_contents_add_original(destination,item,method);
     if(g_contents_api.failed)return 0;
+    if((source_reactor||destination_reactor)&&!g_reactor_update_installed)return 0;
     // Swaps and transfers to other storage are refused before the source is removed.
     void* inventory=contents_inventory();
     if(source_locker==destination_locker||
@@ -283,18 +340,22 @@ uint8_t contents_add_hook(void* destination,void* item,void* method) {
     if(g_contents_pending.used||g_contents_load.active)return 0;
     auto& local=g_contents_lockers[id];
     if(g_local_is_host){if(!contents_baseline(id)||local.authority.reserved)return 0;}
-    else if(!local.ready||local.repairing){contents_query(id);contents_notify("SNMP: обновляется содержимое шкафа. Повтори перенос через секунду.");return 0;}
+    else if(!local.ready||local.repairing){contents_query(id);contents_notify("SNMP: содержимое обновляется. Повтори перенос через секунду.");return 0;}
     void* pickup=contents_field(item,g_contents_api.item_pickup);lc::Message q;
     q.kind=lc::Request;q.locker=id;q.recipient=net_session_host_id();q.request=++g_contents_request;
     q.revision=g_local_is_host?local.authority.revision:local.revision;q.deposit=destination_locker;
     if(!build_live(pickup)||!contents_id(pickup,&q.item.id))return 0;
     q.item.tech=int32_t(g_pickup_get_tech.call(pickup,g_pickup_get_tech.method));
+    if(destination_reactor&&!g_bioreactor_api.can_add.call(q.item.tech,g_bioreactor_api.can_add.method))return 0;
     if(!contents_serialize(pickup,&q.item.data)){contents_notify("SNMP: не удалось сохранить состояние предмета; перенос не выполнен.");return 0;}
     if(g_local_is_host) {
         auto grant=local.authority.begin(net_local_id(),q);if(grant.kind!=lc::Grant)return 0;
         bool ok=contents_move(destination,item);contents_suppress(pickup);
         auto done=local.authority.finish(net_local_id(),q,ok);local.revision=done.revision;
-        if(ok){contents_send(done);LOG_INFO("locker contents: host %s id=%s item=%s revision=%llu",q.deposit?"deposit":"take",id.c_str(),q.item.id.c_str(),(unsigned long long)done.revision);}
+        if(ok){
+            if(g_build_baseline&&net_peer_count())contents_send(done);
+            LOG_INFO("locker contents: host %s id=%s item=%s revision=%llu",q.deposit?"deposit":"take",id.c_str(),q.item.id.c_str(),(unsigned long long)done.revision);
+        }
         return ok;
     }
     if(!contents_send(q))return 0;
@@ -316,8 +377,10 @@ uint8_t contents_remove_hook(void* self,void* item,uint8_t forced,uint8_t verbos
 uint8_t contents_allow_remove_hook(void* self,void* pickup,uint8_t verbose,void* method) {
     if(!g_contents_internal&&g_contents_api.ready&&contents_world_ready()) {
         std::string id;
-        if(contents_parent(self,&id)) {
+        bool reactor=false;
+        if(contents_parent(self,&id,&reactor)) {
             auto& local=g_contents_lockers[id];
+            if(reactor&&g_reactor_update_installed&&!g_local_is_host&&!local.ready)contents_query(id);
             if(g_contents_api.failed||g_contents_pending.used||local.repairing||
                (g_local_is_host?local.authority.reserved:!local.ready))return 0;
         }
@@ -487,7 +550,11 @@ void contents_poll_load() {
        int32_t(g_pickup_get_tech.call(pickup,g_pickup_get_tech.method))!=load.message.item.tech) {
         a.failed=true;contents_notify("SNMP: восстановленный предмет не прошёл проверку идентификатора/типа.");return;
     }
-    void* container=contents_container(load.message.locker);if(!container)return;
+    bool reactor=false;
+    void* container=contents_container(load.message.locker,&reactor);if(!container)return;
+    if(reactor&&!g_bioreactor_api.can_add.call(load.message.item.tech,g_bioreactor_api.can_add.method)) {
+        a.failed=true;contents_notify("SNMP: реактор отклонил тип восстановленного топлива.");return;
+    }
     if(!a.room.call(container,pickup,a.room.method)){a.failed=true;contents_notify("SNMP: в шкафу нет места для подтверждённого переноса; операция удерживается.");return;}
     contents_suppress(pickup);
     void* inventory_item=nullptr;
@@ -523,9 +590,12 @@ void contents_handle(uint32_t origin,const lc::Message& m) {
             auto& authority=g_contents_lockers[m.locker].authority;
             auto old=authority.replies.find({origin,m.request});
             if(old!=authority.replies.end()){contents_send(old->second);return;}
-            void* container=contents_container(m.locker);
+            bool reactor=false;
+            void* container=contents_container(m.locker,&reactor);
             if(!container){contents_send(authority.reply(m,lc::Reject,origin));return;}
-            if(m.deposit&&!authority.reserved&&!g_contents_api.room_tech.call(container,m.item.tech,g_contents_api.room_tech.method)) {
+            if(m.deposit&&!authority.reserved&&
+               ((reactor&&!g_bioreactor_api.can_add.call(m.item.tech,g_bioreactor_api.can_add.method))||
+                !g_contents_api.room_tech.call(container,m.item.tech,g_contents_api.room_tech.method))) {
                 auto reject=authority.reply(m,lc::Reject,origin);authority.replies.emplace(lc::Key{origin,m.request},reject);contents_send(reject);return;
             }
             auto reply=authority.begin(origin,m);
@@ -553,13 +623,15 @@ void contents_handle(uint32_t origin,const lc::Message& m) {
     }
     // Guests accept state and permission ONLY from the selected session host.
     if(origin!=host)return;
+    const auto* build=g_locker_registry.find(m.locker.c_str());
+    if(build&&build->removal_applied)return;
     auto& local=g_contents_lockers[m.locker];
     if(m.kind==lc::Grant){contents_apply_grant(m);return;}
     if(m.kind==lc::Reject) {
         if(g_contents_pending.used&&g_contents_pending.request.request==m.request&&g_contents_pending.request.locker==m.locker) {
             if(g_contents_pending.applied){g_contents_api.failed=true;contents_notify("SNMP: конфликт подтверждения переноса. Сохрани диагностику.");return;}
             g_contents_pending={};local.ready=false;local.next_query=0;contents_query(m.locker);
-            contents_notify("SNMP: шкаф изменился или занят другим игроком. Повтори перенос после обновления.");
+            contents_notify("SNMP: содержимое изменилось или занято другим игроком. Повтори перенос после обновления.");
         }return;
     }
     if(m.kind==lc::Snapshot) {
@@ -584,13 +656,18 @@ void contents_handle(uint32_t origin,const lc::Message& m) {
         }
         if(m.revision<=local.revision)return;
         if(!local.ready||m.revision!=local.revision+1||g_contents_pending.used){local.ready=false;local.next_query=0;contents_query(m.locker);return;}
-        void* container=contents_container(m.locker);ContentsNativeItem item;
+        void* container=contents_container(m.locker);
+        std::vector<ContentsNativeItem> actual;
+        if(!contents_items(container,&actual)){local.ready=false;local.next_query=0;contents_query(m.locker);return;}
+        auto item=std::find_if(actual.begin(),actual.end(),[&](const ContentsNativeItem& i){return i.state.id==m.item.id;});
         if(m.deposit) {
-            if(!contents_item(container,m.item.id,&item)) {
+            if(item==actual.end()) {
                 local.ready=false;
                 if(!contents_start_load(origin,m)){local.next_query=0;contents_query(m.locker);}return;
             }
-        } else if(contents_item(container,m.item.id,&item)&&!contents_remove_copy(container,item))return;
+        } else if(item!=actual.end()&&!contents_remove_copy(container,*item)) {
+            local.ready=false;local.next_query=0;contents_query(m.locker);return;
+        }
         local.revision=m.revision;local.ready=true;
         LOG_INFO("locker contents: peer delta applied id=%s item=%s deposit=%u revision=%llu",m.locker.c_str(),m.item.id.c_str(),unsigned(m.deposit),(unsigned long long)m.revision);
     }
@@ -613,6 +690,7 @@ void tick_locker_contents(const LocalState& local) try {
     }
     uint8_t session[16]{};uint32_t epoch=0;
     if(!net_geometry_session(session,&epoch))return;
+    if(g_reactor_update_installed&&!g_bioreactor_api.ready)build_bioreactor_resolve();
     if(!g_contents_context||g_contents_epoch!=epoch||memcmp(session,g_contents_session,16)) {
         if(g_contents_context&&(g_contents_pending.used||g_contents_load.active)) {
             a.failed=true;contents_notify("SNMP: сессия сменилась во время переноса. Сохрани диагностику перед перезапуском.");return;
@@ -625,6 +703,8 @@ void tick_locker_contents(const LocalState& local) try {
         auto entry=std::move(g_contents_incoming.front());g_contents_incoming.pop_front();contents_handle(entry.first,entry.second);
     }
     for(auto& entry:g_contents_lockers)if(!g_local_is_host) {
+        const auto* build=g_locker_registry.find(entry.first.c_str());
+        if(build&&build->removal_applied)continue;
         contents_reconcile(entry.first);
         // Queries made while the host reserves an item receive no stale snapshot.
         // Keep the open/refresh request alive without requiring another tap.
@@ -646,4 +726,77 @@ void tick_locker_contents(const LocalState& local) try {
 } catch(...){
     g_contents_api.failed=true;
     contents_notify("SNMP: ошибка переноса вещей; повторные операции остановлены. Сохрани диагностический ZIP.");
+}
+
+// Unity dispatches MonoBehaviour.Update through the method table. The native
+// burn removes fuel directly, outside the ItemsContainer interface used by the UI.
+void contents_reactor_update(void* reactor,void* method) try {
+    auto native=[&](){g_reactor_update.call(reactor,method);};
+    if(!g_reactor_update_installed||!g_contents_api.hooks||!g_contents_context||!g_role_known||
+       !g_bioreactor_api.ready){native();return;}
+    void* container=contents_field(reactor,g_bioreactor_api.container);
+    const int32_t count=build_bioreactor_fuel(reactor);
+    if(!container||count<0||(g_local_is_host&&count==0)){native();return;}
+    std::string id;
+    if(!contents_reactor_id(reactor,&id)) {
+        if(g_local_is_host||!g_build_baseline)native();
+        return;
+    }
+    auto& local=g_contents_lockers[id];
+    if(!g_local_is_host) {
+        if(g_build_baseline&&!local.repairing&&!g_contents_pending.used&&
+           build_now()>=local.next_reactor_refresh) {
+            contents_query(id);
+            local.next_reactor_refresh=build_now()+10;
+        }
+        return;
+    }
+    if(!contents_world_live())return;
+    const bool has_peer=g_build_baseline&&net_peer_count()!=0;
+    if(g_contents_api.failed||!contents_baseline(id)||local.authority.reserved||
+       UINT64_MAX-local.authority.revision<local.authority.items.size()||
+       (has_peer&&g_contents_outgoing.size()+local.authority.items.size()>64))return;
+    native();
+    if(build_bioreactor_fuel(reactor)==count)return;
+
+    std::vector<ContentsNativeItem> actual;
+    std::vector<lc::Item> remaining;
+    std::vector<lc::Message> deltas;
+    if(contents_items(container,&actual)) {
+        for(auto& item:actual)remaining.push_back(std::move(item.state));
+        if(local.authority.record_consumption(id,remaining,&deltas)) {
+            local.revision=local.authority.revision;
+            for(auto& delta:deltas) {
+                uint8_t guid[16]{};
+                guid_from_string(delta.item.id.c_str(),guid);
+                suppress_item(guid);
+                LOG_INFO("bioreactor: consumed id=%s item=%s revision=%llu",id.c_str(),
+                         delta.item.id.c_str(),(unsigned long long)delta.revision);
+                if(has_peer&&!contents_send(std::move(delta)))throw "failed to send fuel delta";
+            }
+            return;
+        }
+    }
+    throw "could not verify fuel after consumption";
+} catch(...) {
+    g_contents_api.failed=true;
+    LOG_ERROR("bioreactor: fuel update failed; shared transfers paused");
+}
+
+void contents_install_reactor_update() {
+    auto* reactor=build_class("BaseBioReactor");
+    g_reactor_update.bind(reactor?find_method(reactor,"Update",0):nullptr);
+    if(!g_reactor_update){LOG_WARN("bioreactor: Update unavailable");return;}
+    char* method=reinterpret_cast<char*>(g_reactor_update.method);
+    void* replacement=reinterpret_cast<void*>(&contents_reactor_update);
+    if(!write_pointer(method+kMethodPointerOffset,replacement)) {
+        LOG_WARN("bioreactor: could not install Update hook");return;
+    }
+    if(*reinterpret_cast<void**>(method+kVirtualPointerOffset)&&
+       !write_pointer(method+kVirtualPointerOffset,replacement)) {
+        write_pointer(method+kMethodPointerOffset,reinterpret_cast<void*>(g_reactor_update.call));
+        return;
+    }
+    g_reactor_update_installed=true;
+    LOG_INFO("bioreactor: fuel update hook installed");
 }

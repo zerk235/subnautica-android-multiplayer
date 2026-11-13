@@ -135,9 +135,16 @@ def main():
     subprocess.run([str(java_bin), "-cp", str(bt / "lib/d8.jar"), "com.android.tools.r8.D8",
                     "--min-api", "29", "--lib", str(android), "--output", str(out / "dex"),
                     str(classes), str(dep), *map(str,shizuku)], check=True)
+    res = ROOT / "installer/res"
+    if res.is_dir():
+        compiled = out / "res.zip"
+        subprocess.run([str(bt / ("aapt2" + suffix)), "compile", "--dir", str(res), "-o", str(compiled)], check=True)
     unsigned = out / "installer.unsigned.apk"
-    subprocess.run([str(bt / ("aapt2" + suffix)), "link", "-I", str(android), "--manifest", str(out / "AndroidManifest.xml"),
-                    "-A", str(out / "assets"), "-o", str(unsigned)], check=True)
+    link = [str(bt / ("aapt2" + suffix)), "link", "-I", str(android), "--manifest", str(out / "AndroidManifest.xml"),
+            "-A", str(out / "assets"), "-o", str(unsigned)]
+    if res.is_dir():
+        link += ["--auto-add-overlay", "-R", str(compiled)]
+    subprocess.run(link, check=True)
     with zipfile.ZipFile(unsigned, "a") as z:
         for file in (out / "dex").glob("*.dex"): z.write(file, file.name)
     aligned = out / "installer.aligned.apk"

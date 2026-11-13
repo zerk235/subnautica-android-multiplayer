@@ -81,7 +81,13 @@ uint8_t build_completed_set_state(void* self, uint8_t value, uint8_t set_amount,
             } else if (base_geometry::face_type_for_tech(state.tech_type)>=0) {
                 // moduleFace links appliances; a hatch is its own structural face.
                 // Room face arrays can exceed shape*6; they are not hatch metadata.
-                if (state.face_has_value || !build_capture_hatch(self,&geometry,state.tech_type)) return false;
+                if ((state.face_has_value && state.tech_type!=base_geometry::kBioreactorTech) ||
+                    !build_capture_hatch(self,&geometry,state.tech_type)) {
+                    if(state.tech_type==base_geometry::kBioreactorTech)
+                        LOG_WARN("bioreactor: construction face capture failed id=%s",state.object_id);
+                    return false;
+                }
+                state.face_has_value=0;
             } else {
                 int32_t offset[3]{}, anchor[3]{};
                 char target[kWorldEventObjectIdSize]{};
@@ -183,7 +189,9 @@ void* build_final_deconstruction(void* self, void* method) {
         [&]() {
             WorldEvent demolition{};
             if (!build_capture(self, &demolition) ||
-                (base_geometry::piece_cell_type(demolition.tech_type) < 0 && base_geometry::face_type_for_tech(demolition.tech_type)<0 && demolition.tech_type!=5504) || demolition.face_has_value) return false;
+                (base_geometry::piece_cell_type(demolition.tech_type) < 0 && base_geometry::face_type_for_tech(demolition.tech_type)<0 && demolition.tech_type!=5504) ||
+                (demolition.face_has_value && demolition.tech_type!=base_geometry::kBioreactorTech)) return false;
+            demolition.face_has_value=0;
             if (demolition.tech_type==5504) {
                 if (!build_capture_ladder(self,&geometry,true)) return false;
             } else if (base_geometry::face_type_for_tech(demolition.tech_type)>=0) {
