@@ -2252,7 +2252,9 @@ void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
     if (g_anim_set_bool) {
         static const char* kUsing[3] = {"using_tool", "using_tool_first", "using_tool_alt"};
         static void* s_using[3] = {nullptr, nullptr, nullptr};
-        bool use = (peer.flags & kFlagUsingTool) != 0;
+        // FlashLight.OnToolUseAnim toggles the lamp. A cloned ArmsController can
+        // dispatch that event to the local held tool; the beam already has its own flag.
+        bool use = peer.held_tech != 507 && (peer.flags & kFlagUsingTool) != 0;
         for (int i = 0; i < 3; i++) {
             if (!s_using[i]) s_using[i] = cached_managed_string(kUsing[i]);
             if (s_using[i]) {
@@ -2262,7 +2264,7 @@ void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
         // Overwrite watch: if something on the clone clears the flag after this write, the
         // next frame reads it back changed and the log names the eaten swing. Gated on a
         // stable peer flag so rapid clicking (legitimate transitions) stays silent.
-        bool peer_use = (peer.flags & kFlagUsingTool) != 0;
+        bool peer_use = use;
         if (g_anim_get_bool && s_using[0] && avatar->written_using_valid &&
             peer_use == avatar->peer_using_last) {
             bool back =
@@ -3533,6 +3535,10 @@ void* g_fpmodel_view_field=nullptr;
 Entry<GetBoundsFn> g_held_renderer_bounds;
 void* g_tool_right_ik_field=nullptr;
 void* g_tool_left_ik_field=nullptr;
+void* g_seaglide_map_type=nullptr;
+void* g_seaglide_map_name=nullptr;
+void* g_seaglide_map_holder_field=nullptr;
+void* g_seaglide_map_object_field=nullptr;
 void* g_arms_hand_field=nullptr;
 void* g_arms_attach_field=nullptr;
 // Held v3 prop cleanup. Colliders anywhere in the prop subtree are switched off through the
@@ -6524,6 +6530,24 @@ void follow_avatar_held_prop(RemoteAvatar* avatar) {
     }
 }
 
+void hide_remote_seaglide_map(void* prop, void* root) {
+    if (!il2cpp_field_get_value) return;
+    void* map = find_component_in_hierarchy(prop, g_seaglide_map_type, g_seaglide_map_name, 0);
+    if (!map) return;
+    if (g_behaviour_set_enabled)
+        g_behaviour_set_enabled.call(map, false, g_behaviour_set_enabled.method);
+    // The equipped source can already have a live map under its holder.
+    for (void* field : {g_seaglide_map_holder_field, g_seaglide_map_object_field}) {
+        if (!field) continue;
+        void* visual = nullptr;
+        il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(map), field, &visual);
+        if (!visual || visual == prop) continue;
+        void* transform = g_get_go_transform.call(visual, g_get_go_transform.method);
+        if (transform != root && prop_owns_transform(root, transform))
+            g_set_active.call(visual, false, g_set_active.method);
+    }
+}
+
 // Instantiates the prop for one avatar. True when it is in place, false when no source exists
 // yet (the caller retries on a cooldown) or the API is incomplete.
 bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
@@ -6586,7 +6610,8 @@ bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
     LOG_INFO("held source: peer=%08x tech=%u tool=%p socket=%d plug=%p rightIK=%p selected=%p wrist=%u",
         avatar->id,tech,tool,socket,plug,right_ik,grip,unsigned(wrist_grip));
     bool controlled_light=prepare_remote_held_light(avatar,prop,tech);
-    avatar->held_body_pose=prepare_held_body_pose(avatar,prop_tf,left_ik,right_ik,tech);
+    if (tech == 751) hide_remote_seaglide_map(prop, prop_tf);
+    avatar->held_body_pose=prepare_held_body_pose(avatar,prop,prop_tf,left_ik,right_ik,tech);
     if (g_pickupable_type) {
         void* pickupable=g_get_component.call(prop,g_pickupable_type,g_get_component.method);
         if (pickupable && g_object_destroy_immediate) g_object_destroy_immediate.call(pickupable,g_object_destroy_immediate.method);
@@ -6788,6 +6813,12 @@ void resolve_item_api() {
         g_toggle_lights_type=il2cpp_type_get_object(il2cpp_class_get_type(toggle_lights));
     g_toggle_lights_parent=build_field_on(toggle_lights,"lightsParent",0x20);
     g_toggle_lights_active=build_field_on(toggle_lights,"lightsActive",0x5C);
+    auto* seaglide_map = find_class_in_domain("", "VehicleInterface_MapController");
+    if (seaglide_map && il2cpp_class_get_type && il2cpp_type_get_object)
+        g_seaglide_map_type = il2cpp_type_get_object(il2cpp_class_get_type(seaglide_map));
+    g_seaglide_map_name = cached_managed_string("VehicleInterface_MapController");
+    g_seaglide_map_holder_field = build_field_on(seaglide_map, "mapHolder", 0x28);
+    g_seaglide_map_object_field = build_field_on(seaglide_map, "mapObject", 0x80);
     // GameObject.set_layer for the same walk (see the SetLayerFn typedef).
     struct Il2CppClass* prop_go = find_class_in_domain("UnityEngine", "GameObject");
     if (prop_go) {
@@ -6970,6 +7001,12 @@ void hooked_player_update(void* self, void* method) {
     local.held_tech = read_held_tech();
     read_local_held_rotation(self,&local);
     read_local_held_light(&local);
+    static bool last_flashlight_on = false;
+    bool flashlight_on = local.held_tech == 507 && (local.flags & kFlagToolLight) != 0;
+    if (flashlight_on != last_flashlight_on) {
+        LOG_INFO("held light tx: tech=507 on=%u held=%u", unsigned(flashlight_on), local.held_tech);
+        last_flashlight_on = flashlight_on;
+    }
     read_avatar_environment(self,&local);
     // What the body wears, so the peers can dress their avatar in the real suit/fins/head.
     read_equipment(&local.suit_tech, &local.fins_tech, &local.head_tech);

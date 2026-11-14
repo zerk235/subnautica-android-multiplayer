@@ -4,6 +4,16 @@ void* g_toggle_lights_type=nullptr;
 void* g_toggle_lights_parent=nullptr;
 void* g_toggle_lights_active=nullptr;
 
+void* owned_held_lights_parent(void* prop,void* toggle) {
+    if (!prop || !toggle || !g_toggle_lights_parent || !g_get_go_transform) return nullptr;
+    void* parent=nullptr;
+    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(toggle),g_toggle_lights_parent,&parent);
+    if (!parent || parent==prop) return nullptr;
+    void* root=g_get_go_transform.call(prop,g_get_go_transform.method);
+    void* parent_tf=g_get_go_transform.call(parent,g_get_go_transform.method);
+    return parent_tf!=root && prop_owns_transform(root,parent_tf) ? parent : nullptr;
+}
+
 template<class Visit> void visit_held_lights(void* root,Visit visit) {
     if (!root || !g_light_type_obj || g_get_component_is_string) return;
     void* stack[128];size_t top=0,visited=0;stack[top++]=root;
@@ -34,7 +44,8 @@ void read_local_held_light(LocalState* local) {
     bool active=false;
     if (toggle) il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(toggle),g_toggle_lights_active,&active);
     if (!active) return;
-    visit_held_lights(go,[&](void* lamp,void* lamp_go) {
+    void* parent=local->held_tech==507 ? owned_held_lights_parent(go,toggle) : go;
+    visit_held_lights(parent,[&](void* lamp,void* lamp_go) {
         if (g_behaviour_get_enabled.call(lamp,g_behaviour_get_enabled.method) &&
             g_go_get_active_hierarchy.call(lamp_go,g_go_get_active_hierarchy.method)) local->flags|=kFlagToolLight;
     });
@@ -45,16 +56,15 @@ bool prepare_remote_held_light(RemoteAvatar* avatar,void* prop,uint32_t tech) {
         !g_behaviour_set_enabled || !g_behaviour_get_enabled) return false;
     void* toggle=find_component_in_hierarchy(prop,g_toggle_lights_type,nullptr,0);
     if (!toggle) return false;
-    void* parent=nullptr;
-    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(toggle),g_toggle_lights_parent,&parent);
-    void* root=g_get_go_transform.call(prop,g_get_go_transform.method);
-    void* parent_tf=parent ? g_get_go_transform.call(parent,g_get_go_transform.method) : nullptr;
-    if (!parent_tf || !prop_owns_transform(root,parent_tf)) return false;
+    void* parent=owned_held_lights_parent(prop,toggle);
+    if (!parent) return false;
     g_behaviour_set_enabled.call(toggle,false,g_behaviour_set_enabled.method);
     avatar->held_lights_parent=parent;
     avatar->held_light_count=0;
-    visit_held_lights(prop,[&](void* lamp,void*) {
-        if (avatar->held_light_count<8) {
+    void* parent_tf=g_get_go_transform.call(parent,g_get_go_transform.method);
+    visit_held_lights(prop,[&](void* lamp,void* lamp_go) {
+        void* lamp_tf=g_get_go_transform.call(lamp_go,g_get_go_transform.method);
+        if (avatar->held_light_count<8 && (tech!=507 || prop_owns_transform(parent_tf,lamp_tf))) {
             unsigned i=avatar->held_light_count++;
             avatar->held_lights[i]=lamp;
             avatar->held_light_enabled[i]=g_behaviour_get_enabled.call(lamp,g_behaviour_get_enabled.method);

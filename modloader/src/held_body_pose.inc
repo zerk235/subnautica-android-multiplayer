@@ -7,13 +7,22 @@ void clear_held_body_ik(RemoteAvatar* avatar) {
     avatar->held_world_ik_bound=false;
 }
 
-bool prepare_held_body_pose(RemoteAvatar* avatar,void* root,void* left,void* right,uint32_t tech) {
-    if (tech!=751 || !avatar->transform || !g_arms_type_obj || !g_arms_world_targets ||
-        !g_set_parent || !g_set_position || !g_set_rotation || !g_set_active || !g_get_go_transform ||
-        !prop_owns_transform(root,left) || !prop_owns_transform(root,right)) return false;
-    void* arms=find_component_in_hierarchy(avatar->game_object,g_arms_type_obj,g_arms_name_str,0);
-    if (!arms) return false;
-    avatar->held_arms=arms;avatar->held_left_ik=left;avatar->held_right_ik=right;
+void* resolve_seaglide_grip(void* prop,void* root,void* authored,const char* name) {
+    if (prop_owns_transform(root,authored)) return authored;
+    void* grip=find_child_by_name(prop,name,0);
+    if (!grip) return nullptr;
+    void* transform=g_get_go_transform.call(grip,g_get_go_transform.method);
+    return prop_owns_transform(root,transform) ? transform : nullptr;
+}
+
+bool prepare_held_body_pose(RemoteAvatar* avatar,void* prop,void* root,void* left,void* right,uint32_t tech) {
+    if (tech!=751 || !prop || !root || !avatar->transform ||
+        !g_set_parent || !g_set_position || !g_set_rotation || !g_set_active || !g_get_go_transform) return false;
+    avatar->held_left_ik=resolve_seaglide_grip(prop,root,left,"left_hand_grip");
+    avatar->held_right_ik=resolve_seaglide_grip(prop,root,right,"right_hand_grip");
+    avatar->held_arms=nullptr;
+    if ((avatar->held_left_ik || avatar->held_right_ik) && g_arms_type_obj && g_arms_world_targets)
+        avatar->held_arms=find_component_in_hierarchy(avatar->game_object,g_arms_type_obj,g_arms_name_str,0);
     g_set_parent.call(root,avatar->transform,false,g_set_parent.method);
     return true;
 }
@@ -29,10 +38,11 @@ void apply_held_body_pose(RemoteAvatar* avatar,const PeerState& peer) {
     const auto& p=peer.held_offset;
     g_set_position.call(tf,Vector3{peer.x+p.x,peer.y+p.y,peer.z+p.z},g_set_position.method);
     g_set_rotation.call(tf,Quaternion{q.x,q.y,q.z,q.w},g_set_rotation.method);
-    if (!avatar->held_world_ik_bound) {
+    if (avatar->held_arms && !avatar->held_world_ik_bound) {
         g_arms_world_targets.call(avatar->held_arms,avatar->held_left_ik,avatar->held_right_ik,g_arms_world_targets.method);
         avatar->held_world_ik_bound=true;
     }
     if ((g_avatar_frame%120)==0)
-        LOG_INFO("held body pose: peer=%08x tech=%u offset=(%.3f,%.3f,%.3f) twoHands=1",avatar->id,peer.held_tech,p.x,p.y,p.z);
+        LOG_INFO("held body pose: peer=%08x tech=%u offset=(%.3f,%.3f,%.3f) leftIK=%p rightIK=%p",
+                 avatar->id,peer.held_tech,p.x,p.y,p.z,avatar->held_left_ik,avatar->held_right_ik);
 }

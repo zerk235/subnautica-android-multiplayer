@@ -7,7 +7,7 @@
 template<class Fn> struct Entry { Fn call;void* method=nullptr;explicit operator bool() const{return call!=nullptr;} };
 struct Il2CppObject {};
 struct Node {Node* parent=nullptr;std::vector<Node*> children;bool active=true,enabled=true,is_lamp=false,is_toggle=false,lights_active=false;Node* lights_parent=nullptr;};
-Node prop,group,lamp,decor,toggle;Node* held=&prop;
+Node prop,group,lamp,decor,toggle,outside_lamp;Node* held=&prop;
 int light_type,toggle_type,parent_field,active_field;
 void* g_light_type_obj=&light_type;bool g_get_component_is_string=false;
 unsigned long g_avatar_frame=1;
@@ -24,7 +24,7 @@ bool hierarchy(void* go,void*){auto* n=(Node*)go;for(int i=0;n && i<128;++i,n=n-
 void enable(void* go,bool value,void*){((Node*)go)->enabled=value;}
 void activate(void* go,bool value,void*){((Node*)go)->active=value;}
 void* inventory_get(void*,void*){return held;}
-uint32_t tech(void*,void*){return 751;}
+uint32_t tech(void*,void*){return 507;}
 Entry<decltype(&component)> g_get_component{component};
 Entry<decltype(&identity)> g_get_go_transform{identity},g_get_game_object{identity};
 Entry<decltype(&child_count)> g_get_child_count{child_count};
@@ -40,24 +40,30 @@ bool prop_owns_transform(void* root,void* go){for(auto* n=(Node*)go;n;n=n->paren
 void il2cpp_field_get_value(Il2CppObject* object,void* field,void* out){auto* n=(Node*)object;if(field==&parent_field)*(Node**)out=n->lights_parent;else if(field==&active_field)*(bool*)out=n->lights_active;else assert(false);}
 #include "modloader/src/held_light.inc"
 int main(){
-    prop.children={&group,&toggle};group.parent=&prop;toggle.parent=&prop;
+    prop.children={&group,&toggle,&outside_lamp};group.parent=&prop;toggle.parent=&prop;
+    outside_lamp.parent=&prop;outside_lamp.is_lamp=true;
     group.children={&lamp,&decor};lamp.parent=&group;decor.parent=&group;
     lamp.is_lamp=decor.is_lamp=true;decor.enabled=false;
     toggle.is_toggle=true;toggle.lights_parent=&group;toggle.lights_active=true;
     g_toggle_lights_type=&toggle_type;g_toggle_lights_parent=&parent_field;g_toggle_lights_active=&active_field;
-    LocalState local;read_local_held_light(&local);assert(local.flags&kFlagToolLight);
+    LocalState local;local.held_tech=507;
+    read_local_held_light(&local);assert(local.flags&kFlagToolLight);
     lamp.enabled=false;read_local_held_light(&local);assert(!(local.flags&kFlagToolLight));
     lamp.enabled=true;group.active=false;read_local_held_light(&local);assert(!(local.flags&kFlagToolLight));
     group.active=true;toggle.lights_active=false;read_local_held_light(&local);assert(!(local.flags&kFlagToolLight));
     toggle.lights_active=true;held=nullptr;read_local_held_light(&local);assert(!(local.flags&kFlagToolLight));held=&prop;
-    RemoteAvatar avatar;assert(prepare_remote_held_light(&avatar,&prop,751));
-    assert(!toggle.enabled && !lamp.enabled && !group.active && avatar.held_light_count==2);
-    PeerState peer;peer.flags=kFlagToolLight;apply_peer_held_light(&avatar,peer);
+    RemoteAvatar avatar;avatar.held_tech=507;assert(prepare_remote_held_light(&avatar,&prop,507));
+    assert(!toggle.enabled && !lamp.enabled && !outside_lamp.enabled && !group.active && avatar.held_light_count==2);
+    PeerState peer;peer.held_tech=507;peer.flags=kFlagToolLight;apply_peer_held_light(&avatar,peer);
     assert(group.active && lamp.enabled && !decor.enabled && lamp.parent==&group);
+    assert(!outside_lamp.enabled);
     peer.flags=0;apply_peer_held_light(&avatar,peer);assert(!group.active && !lamp.enabled);
-    peer.flags=kFlagToolLight;peer.held_tech=507;apply_peer_held_light(&avatar,peer);assert(!group.active && !lamp.enabled);
-    peer.held_tech=751;apply_peer_held_light(&avatar,peer);assert(group.active && lamp.enabled);
-    Node foreign;toggle.lights_parent=&foreign;RemoteAvatar other;assert(!prepare_remote_held_light(&other,&prop,751));
+    peer.flags=kFlagToolLight;peer.held_tech=751;apply_peer_held_light(&avatar,peer);assert(!group.active && !lamp.enabled);
+    peer.held_tech=507;apply_peer_held_light(&avatar,peer);assert(group.active && lamp.enabled);
+    Node foreign;toggle.lights_parent=&foreign;RemoteAvatar other;
+    assert(!prepare_remote_held_light(&other,&prop,507) && foreign.active);
+    toggle.lights_parent=&prop;
+    assert(!prepare_remote_held_light(&other,&prop,507) && prop.active);
     assert(!prepare_remote_held_light(&other,&prop,509));
     puts("actual held-light path: owner toggle, energy-disabled lamp, inactive parent, holster, copied driver disabled, authored lamp parent, off/on and mismatched tool guards passed");
 }
