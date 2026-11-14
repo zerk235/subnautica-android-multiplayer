@@ -274,9 +274,11 @@ bool contents_move(void* destination,void* item) {
     uint8_t ok=g_contents_add_original(destination,item,g_contents_api.add.method);
     return ok!=0;
 }
-bool contents_remove_copy(void* container,ContentsNativeItem& item) {
+bool contents_remove_copy(void* container,ContentsNativeItem& item,bool is_reactor=false) {
     ContentsScope scope;
-    uint8_t ok=g_contents_remove_original(container,item.inventory_item,0,0,g_contents_api.remove.method);
+    // The reactor's normal extraction callback refuses fuel. Apply host state
+    // with the same forced removal that the game uses when burning fuel.
+    uint8_t ok=g_contents_remove_original(container,item.inventory_item,is_reactor,0,g_contents_api.remove.method);
     if(!ok)return false;
     contents_suppress(item.pickup);void* go=g_get_game_object.call(item.pickup,g_get_game_object.method);
     g_set_active.call(go,false,g_set_active.method);g_object_destroy.call(go,g_object_destroy.method);return true;
@@ -484,11 +486,12 @@ void contents_open_ready(const std::string& id) {
 }
 void contents_reconcile(const std::string& id) {
     auto& local=g_contents_lockers[id];if(!local.repairing||g_contents_pending.used||g_contents_load.active)return;
-    void* container=contents_container(id);std::vector<ContentsNativeItem> actual;
+    bool reactor=false;
+    void* container=contents_container(id,&reactor);std::vector<ContentsNativeItem> actual;
     if(!contents_items(container,&actual))return;
     for(auto& i:actual) {
         auto expected=std::find_if(local.manifest.begin(),local.manifest.end(),[&](const lc::Item& x){return x.id==i.state.id;});
-        if(expected==local.manifest.end()){if(!contents_remove_copy(container,i))return;}
+        if(expected==local.manifest.end()){if(!contents_remove_copy(container,i,reactor))return;}
         else if(expected->tech!=i.state.tech){g_contents_api.failed=true;contents_notify("SNMP: конфликт типа предмета в шкафу; синхронизация остановлена.");return;}
     }
     bool missing=false;
@@ -656,7 +659,8 @@ void contents_handle(uint32_t origin,const lc::Message& m) {
         }
         if(m.revision<=local.revision)return;
         if(!local.ready||m.revision!=local.revision+1||g_contents_pending.used){local.ready=false;local.next_query=0;contents_query(m.locker);return;}
-        void* container=contents_container(m.locker);
+        bool reactor=false;
+        void* container=contents_container(m.locker,&reactor);
         std::vector<ContentsNativeItem> actual;
         if(!contents_items(container,&actual)){local.ready=false;local.next_query=0;contents_query(m.locker);return;}
         auto item=std::find_if(actual.begin(),actual.end(),[&](const ContentsNativeItem& i){return i.state.id==m.item.id;});
@@ -665,7 +669,8 @@ void contents_handle(uint32_t origin,const lc::Message& m) {
                 local.ready=false;
                 if(!contents_start_load(origin,m)){local.next_query=0;contents_query(m.locker);}return;
             }
-        } else if(item!=actual.end()&&!contents_remove_copy(container,*item)) {
+        } else if(item!=actual.end()&&
+                  (item->state.tech!=m.item.tech||!contents_remove_copy(container,*item,reactor))) {
             local.ready=false;local.next_query=0;contents_query(m.locker);return;
         }
         local.revision=m.revision;local.ready=true;

@@ -4,21 +4,21 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-> **Public demo 0.3.8.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A native HUD marker identifies your partner with a custom player icon, label and distance. Solar panels and Fabricators can be built on a shared base. The installer now has a dark teal interface with **Home**, **Install**, **Worlds** and **Settings** tabs. Install directly on Android without a PC or root. See the [tested features and limitations](docs/COMPATIBILITY.md). Use a separate world and backups for your first tests.
+> **Public demo 0.3.10.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A native HUD marker identifies your partner with a custom player icon, label and distance. Solar Panels, Fabricators and Bioreactors can be built on a shared base. Install directly on Android without a PC or root. See the [tested features and limitations](docs/COMPATIBILITY.md). Use a separate world and backups for your first tests.
 
 This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Download and install
 
-**[Download installer 0.3.8 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.8-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.8-installer-preview)
+**[Download installer 0.3.10 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.10-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.10-installer-preview)
 
-**0.3.8 updates the installer interface:** Home, Install, Worlds and Settings tabs, cards, status chips and step badges. It fixes tab-switching and profile-recovery crashes and a blank screen caused by overlapping screens. The native mod build and protocol **31** are unchanged.
-[Release notes and limitations (Russian)](docs/releases/0.3.8-installer-preview.md).
+**0.3.10 synchronizes Bioreactor fuel.** Both players can add fuel, and the guest sees items disappear when the host consumes them.
+[Release notes and limitations (Russian)](docs/releases/0.3.10-installer-preview.md).
 
 Update the installer over the existing app and keep its data and signing key.
 Save and exit to the game menu, then **Prepare mod → Install prepared mod on both
 phones**. Updating only the installer does not update the game mod. Protocol is
-**31**; matching builds are required. Automatic recovery of an unfinished transfer
+**33**; matching builds are required. Automatic recovery of an unfinished transfer
 after a process crash is not implemented. Use a separate test world and ordinary
 resources first. [Locker contents](docs/LOCKER_CONTENTS.md) · [Diagnostics](docs/DIAGNOSTICS.md).
 
@@ -28,8 +28,6 @@ downloaded world. Autoload after switching roles retains the former host's origi
 When upgrading from 0.2, update SN Multiplayer Installer over the existing app,
 save your game and return to its main menu, then run **Prepare mod → Install
 prepared mod** on both phones. Keep the installer's data: it holds your update key.
-The current release requires protocol **31** and matching builds on both phones;
-older public protocols **23**, **25**, **27**, **28** and **29** are incompatible.
 [Host-selection history in 0.3](docs/releases/0.3.0-installer-preview.md).
 
 Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
