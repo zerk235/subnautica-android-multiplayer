@@ -41,6 +41,21 @@ final class DiagnosticLogs {
                 } catch(Exception error) { warnings.put(name+": "+error.getClass().getSimpleName()+": "+error.getMessage()); }
             }
             // A fixed short configuration value, never arbitrary mod_config files or saves.
+            File recovery=new File(root,"mod_log/fish_pickup");
+            if(recovery.exists()) try {
+                if(!recovery.getCanonicalPath().startsWith(canonical) ||
+                    !OsConstants.S_ISDIR(Os.lstat(recovery.getAbsolutePath()).st_mode)) throw new IOException("Invalid recovery directory");
+                File[] pending=recovery.listFiles((dir,name)->name.matches("[0-9a-f]{32}-[0-9a-f]{32}-[0-9a-f]{8}-[0-9a-f]{16}\\.pending"));
+                if(pending==null) throw new IOException("Cannot list fish recovery journals");
+                int count=0;
+                for(File file:pending) {
+                    if(++count>32) { warnings.put("Журналов подбора больше 32: оставшиеся сохранены на телефоне"); break; }
+                    if(!file.getCanonicalPath().startsWith(canonical)||file.length()>65536) throw new IOException("Invalid fish journal size/path");
+                    byte[] bytes=tail(file,65536); // Whole bounded journal, never just its tail.
+                    entry(out,"game/mod_log/fish_pickup/"+file.getName(),bytes);
+                    files.put(new JSONObject().put("name","game/mod_log/fish_pickup/"+file.getName()).put("capturedBytes",bytes.length).put("recovery",true));
+                }
+            } catch(Exception error) { warnings.put("Журналы подбора: "+error.getMessage()); }
             File role=new File(root,"mod_config/session_role.txt");
             try {
                 if(role.getCanonicalPath().startsWith(canonical) && role.isFile()) {
@@ -68,7 +83,7 @@ final class DiagnosticLogs {
                     if(capturedPids.length()==0) warnings.put("Игра не запущена в текущем профиле: logcat по PID не собран");
                 } catch(Exception error) { warnings.put("Logcat текущей игры недоступен (возможно, игра закрыта): "+error.getMessage()); }
             }
-            meta.put("files",files).put("warnings",warnings).put("scope","Fixed game log files; current game PID logcat only; no SavedGames, APK or keys");
+            meta.put("files",files).put("warnings",warnings).put("scope","Fixed game logs and pending fish pickup journals; current game PID logcat only; no SavedGames, APK or keys");
             entry(out,"game/capture.json",meta.toString(2).getBytes(StandardCharsets.UTF_8));
         }
         return meta;

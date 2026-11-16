@@ -145,3 +145,6 @@ uint32_t world_receive_received(int file_index);
 // much of this file has arrived", unlike the high-water mark.
 uint32_t world_receive_contiguous(int file_index);
 void world_reset_receive();
+// Only metadata of this game's SavedGames tree, only inodes owned by this UID.
+// Main-menu/save-transfer path: permits the user's Shizuku backup to read them.
+void world_prepare_backup_access();

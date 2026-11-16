@@ -3684,6 +3684,9 @@ bool g_host_capture_pending = false;
 // false - the named object is not in memory yet; the caller keeps the event and retries while
 // its chunk streams in, which is the one failure the transport cannot fix for us: it acks on
 // receipt, so delivery is guaranteed but the scene may simply not contain the object yet.
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+void fish_pickup_on_drop(void* pickup);
+#endif
 bool apply_remote_event(const WorldEvent& event) {
     if (!g_pickup_set_visible || !g_set_position) {
         LOG_WARN("event: SetVisible/set_position unavailable, remote events ignored");
@@ -3747,6 +3750,9 @@ bool apply_remote_event(const WorldEvent& event) {
         Vector3 position{event.x, event.y, event.z};
         Vector3 push{event.vx, event.vy, event.vz};
         g_pickup_drop_at.call(pickupable, position, push, false, g_pickup_drop_at.method);
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        fish_pickup_on_drop(pickupable);
+#endif
     } else {
         LOG_WARN("event: Pickupable.Drop(pos,push,bool) unavailable, cannot place the object");
     }
@@ -3990,8 +3996,14 @@ bool contents_locker_busy(const char* id);
 #include "build_sync.inc"
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
 #include "locker_contents_sync.inc"
+void reset_boomerang_sync();
 #include "creature_probe.inc"
 #include "creature_motion_probe.inc"
+bool fish_pickup_suppressed(const creature_motion::Message& identity);
+bool fish_pickup_pose_allowed(const creature_motion::Message& pose);
+extern bool g_reid_wanted;
+#include "boomerang_sync.inc"
+#include "fish_pickup_sync.inc"
 #include "player_marker.inc"
 #endif
 #include "avatar_environment.inc"
@@ -4006,6 +4018,7 @@ void pump_remote_events() {
     for (size_t i = 0; i < count; i++) {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         if(events[i].kind==kWorldEventLockerContents){contents_receive_frame(events[i]);continue;}
+        if(events[i].kind==kWorldEventFishPickup){fish_pickup_receive_frame(events[i]);continue;}
 #endif
         // Build kinds carry a full snapshot; the job table on the game thread owns the
         // apply, so they are queued straight away instead of going through pickup/drop
@@ -4382,6 +4395,11 @@ void* fresh_pinned_id(const char* prefix, unsigned long index) {
 }
 
 void send_item_event(const ItemMark& mark, uint8_t kind) {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    if (kind == kWorldEventDrop) {
+        if (void* pickup = find_pickupable_by_guid(mark.guid)) fish_pickup_on_drop(pickup);
+    }
+#endif
     WorldEvent event{};
     event.kind = kind;
     memcpy(event.guid, mark.guid, sizeof(event.guid));
@@ -7061,6 +7079,8 @@ void hooked_player_update(void* self, void* method) {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
     tick_locker_contents(local);
     if(!tick_creature_motion_probe(local))tick_creature_probe(local);
+    tick_boomerang_sync(published, g_creature_motion_probe.armed || g_creature_probe.requested || g_creature_probe.active);
+    tick_fish_pickup(published);
     tick_player_marker(local);
 #endif
 
@@ -7297,9 +7317,17 @@ void world_context_tick(void* manager) {
         if(menu) il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(menu),g_menu_starting_field,&starting);
     }
     const bool at_menu=menu && !loading && !starting && !daynight_instance();
+    static double next_backup_access = 0;
+    if (at_menu && monotonic_seconds() >= next_backup_access) {
+        next_backup_access = monotonic_seconds() + 10;
+        world_prepare_backup_access();
+    }
     const bool transition=world_context_transition(&g_world_context_watch,slot,loading);
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
-    if(transition||at_menu||loading)hud_marker_destroy("world transition/menu");
+    if (transition || at_menu || loading) {
+        hud_marker_destroy("world transition/menu");
+        if (g_boomerang.host) reset_boomerang_sync();
+    }
 #endif
     if(transition)reset_prefab_requests();
     if((transition || at_menu) && net_session_invalidate_host_world()) {
@@ -7343,9 +7371,36 @@ void world_notice_tick() {
         case WorldNotice::Sent: text = "Кооп: напарник получил мир"; break;
         case WorldNotice::ReceiveFailed: text = "Кооп: не удалось получить мир"; break;
         case WorldNotice::SendFailed: text = "Кооп: передача мира прервалась"; break;
+        case WorldNotice::GuestNoLan:
+            text = "Кооп: нет адреса локальной сети. Отключи VPN и подключись к точке доступа хоста.";
+            break;
+        case WorldNotice::GuestNoPeers:
+            text = "Кооп: за 30 секунд хост не найден. Проверь, что он открыл мир. Отключи VPN и подключись к точке доступа хоста.";
+            break;
+        case WorldNotice::GuestOtherSubnet:
+            text = "Кооп: обнаружена другая подсеть. Отключи VPN и подключись к точке доступа хоста.";
+            break;
+        case WorldNotice::GuestIncompatible:
+            text = "Кооп: версии не совпадают. Проверь версии игры и мода на обоих телефонах.";
+            break;
+        case WorldNotice::GuestNoHostWorld:
+            text = "Кооп: напарник виден в сети. Пусть он выберет «Хост» и откроет мир.";
+            break;
+        case WorldNotice::GuestJoinUnanswered:
+            text = "Кооп: хост виден, но вход не завершился. Проверь, что его мир открыт.";
+            break;
+        case WorldNotice::GuestTransferStalled:
+            text = "Кооп: 30 секунд без прогресса передачи мира. Проверь связь и оставь мир хоста открытым.";
+            break;
+        case WorldNotice::GuestLoadStalled:
+            text = "Кооп: мир получен, загрузка занимает больше 30 секунд.";
+            break;
+        case WorldNotice::HostNoGuest:
+            text = "Кооп: за 30 секунд никто не подключился. Проверь, что напарник запустил игру как гость.";
+            break;
     }
     try {
-        if (void* message = cached_managed_string(text)) {
+        if (void* message = il2cpp_string_new ? il2cpp_string_new(text) : nullptr) {
             add_message.call(message,add_message.method);
             LOG_INFO("world notice: %s",text);
         }

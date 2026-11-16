@@ -60,8 +60,16 @@ public final class DiagnosticsTests extends Instrumentation {
             PatchEngine.write(logs,trace.toString().getBytes(StandardCharsets.UTF_8));
             File saves=new File(game,"SavedGames/slot/scene.bin"); saves.getParentFile().mkdirs(); PatchEngine.write(saves,"NEVER_INCLUDE_SAVES".getBytes(StandardCharsets.UTF_8));
             File remote=new File(dir,"capture.zip");
+            String pendingName="00000000000000000000000000000001-00000000000000000000000000000002-00000003-0000000000000004.pending";
+            File journal=new File(game,"mod_log/fish_pickup/"+pendingName);journal.getParentFile().mkdirs();
+            byte[] recoveryBytes={0,1,2,3,0,5};PatchEngine.write(journal,recoveryBytes);
+            PatchEngine.write(new File(journal.getParentFile(),"private.key"),"NEVER_INCLUDE".getBytes(StandardCharsets.UTF_8));
             DiagnosticLogs.capture(game,new FileOutputStream(remote),false,0);
             try(ZipFile zip=new ZipFile(remote)) {
+                String journalEntry="game/mod_log/fish_pickup/"+pendingName;
+                check(Diagnostics.allowedGameEntry(journalEntry)&&zip.getEntry(journalEntry)!=null,"pending fish journal missing");
+                check(Arrays.equals(recoveryBytes,ApkPatcher.readSmall(zip.getInputStream(zip.getEntry(journalEntry)),65536)),"fish recovery bytes changed");
+                check(!Diagnostics.allowedGameEntry("game/mod_log/fish_pickup/../private.key")&&zip.getEntry("game/mod_log/fish_pickup/private.key")==null,"recovery scope escaped");
                 check(zip.getEntry("game/mod_log/logs/modloader.log")!=null && zip.getEntry("game/log_findings.json")!=null,"game log entries missing");
                 Enumeration<? extends ZipEntry> entries=zip.entries(); while(entries.hasMoreElements()) check(!entries.nextElement().getName().contains("SavedGames"),"saves leaked");
             }

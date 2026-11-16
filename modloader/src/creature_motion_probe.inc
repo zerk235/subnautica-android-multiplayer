@@ -89,6 +89,7 @@ bool motion_read_arm() {
     auto& m=g_creature_motion_probe;m=CreatureMotionProbe{};
     if(!net_geometry_session(m.session.data(),&m.epoch))return false;
     m.authority=net_session_host_id();if(!m.authority)return false;
+    reset_boomerang_sync();
     m.armed=true;m.host=g_local_is_host;m.nonce=nonce;m.armed_at=now;
     m.gap_profile=gap;
     LOG_INFO("motion probe: armed role=%s nonce=%016llx authority=%08x epoch=%u; exact GUID only; finite 60s",
@@ -116,7 +117,7 @@ bool tick_creature_motion_probe(const LocalState& local) try {
         motion_finish("world/role/context changed");return false;
     }
     if(!local.valid||!g_role_known||!contents_world_ready()||!world_operations_ready()||!probe_resolve())return false;
-    static bool ready_logged=false;if(!ready_logged){ready_logged=true;LOG_INFO("motion probe: ready protocol=29; explicit paired arm required");}
+    static bool ready_logged=false;if(!ready_logged){ready_logged=true;LOG_INFO("motion probe: ready protocol=%u; explicit paired arm required", unsigned(kSessionProtocolVersion));}
     if(!m.armed)motion_read_arm();
     cm::Message incoming;
     for(int n=0;n<16&&net_creature_probe_take(&incoming);++n){

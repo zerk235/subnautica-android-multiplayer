@@ -19,6 +19,7 @@
 
 #include "log.h"
 #include "world.h"
+#include "connection_check.h"
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 #include "base_geometry_reliable.h"
 #endif
@@ -228,6 +229,10 @@ constexpr uint32_t kWorldChunkWindow = 4;
 // consumed by adopt_received_world_identity in the finalize). Lives next to the
 // receive state because it describes exactly that transfer.
 uint32_t g_receive_generation = 0;
+// Pump-owned high-water mark. A duplicate manifest/chunk must not postpone the warning.
+uint32_t g_connection_progress_generation = 0;
+uint32_t g_connection_progress_host = 0;
+uint32_t g_connection_received_chunks = 0;
 
 struct WorldAckPacket {
     PacketHeader header;
@@ -620,6 +625,7 @@ const char* event_kind_name(uint8_t kind) {
         case kWorldEventProgress: return "progress";
         case kWorldEventRemove: return "remove";
         case kWorldEventLockerContents: return "locker-contents";
+        case kWorldEventFishPickup: return "fish-pickup";
         default: return "event";
     }
 }
@@ -629,7 +635,7 @@ const char* event_kind_name(uint8_t kind) {
 bool event_kind_known(uint8_t kind) {
     return kind == kWorldEventPickup || kind == kWorldEventDrop ||
            kind == kWorldEventBuild || kind == kWorldEventProgress ||
-           kind == kWorldEventRemove || kind == kWorldEventLockerContents;
+           kind == kWorldEventRemove || kind == kWorldEventLockerContents || kind == kWorldEventFishPickup;
 }
 
 struct EventSlot {
@@ -1755,6 +1761,12 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
             set_handoff(kWorldHandoffFailed, packet.slot, "manifest rejected");
             return;
         }
+        if (g_connection_progress_host != packet.id ||
+            g_connection_progress_generation != packet.generation) {
+            g_connection_progress_host = packet.id;
+            g_connection_progress_generation = packet.generation;
+            g_connection_received_chunks = 0;
+        }
         set_handoff(kWorldHandoffReceiving, manifest.slot, "receiving");
         return;
     }
@@ -1812,6 +1824,7 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
         uint32_t received = 0;
         bool complete = false;
         guest_progress(*manifest, &received, &complete);
+        if (received > g_connection_received_chunks) g_connection_received_chunks = received;
 
         if (complete) {
             // The guest owns the receive buffers, so the guest is the one that has to verify
@@ -3063,6 +3076,155 @@ void drop_stale_vehicles(double now) {
     pthread_mutex_unlock(&g_peers_lock);
 }
 
+struct LanAddress {
+    in_addr address;
+    in_addr mask;
+};
+
+// Check the active broadcast-capable IPv4 interfaces against peers already discovered
+// by the mod. No probes are sent and no other devices on the LAN are enumerated.
+WorldNotice check_guest_discovery(double now) {
+    using namespace connection_check;
+    LanAddress addresses[16]{};
+    size_t address_count = 0;
+    bool tunnel = false;
+    struct ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces) == 0) {
+        for (const auto* it = interfaces; it; it = it->ifa_next) {
+            if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET ||
+                !(it->ifa_flags & IFF_UP) || (it->ifa_flags & IFF_LOOPBACK)) continue;
+            const char* name = it->ifa_name;
+            if (!strncmp(name, "tun", 3) || !strncmp(name, "tap", 3) ||
+                !strncmp(name, "wg", 2) || !strncmp(name, "ipsec", 5)) {
+                tunnel = true;
+                continue;
+            }
+            if (is_cellular_interface(name) || !(it->ifa_flags & IFF_BROADCAST) ||
+                !it->ifa_netmask || address_count == sizeof(addresses) / sizeof(addresses[0]))
+                continue;
+            const auto address = reinterpret_cast<const sockaddr_in*>(it->ifa_addr)->sin_addr;
+            const auto mask = reinterpret_cast<const sockaddr_in*>(it->ifa_netmask)->sin_addr;
+            if (!address.s_addr || !mask.s_addr) continue;
+            addresses[address_count++] = {address, mask};
+            char ip[INET_ADDRSTRLEN]{}, mask_text[INET_ADDRSTRLEN]{};
+            inet_ntop(AF_INET, &address, ip, sizeof(ip));
+            inet_ntop(AF_INET, &mask, mask_text, sizeof(mask_text));
+            LOG_INFO("connection check: local %s IPv4=%s mask=%s", name, ip, mask_text);
+        }
+        freeifaddrs(interfaces);
+    }
+
+    VisiblePeers visible{};
+    pthread_mutex_lock(&g_peers_lock);
+    for (size_t i = 0; i < kMaxPeers; ++i) {
+        const auto& peer = g_peers[i];
+        const auto& remote = g_remote[i];
+        if (!peer.active || now - peer.last_seen > kPeerTimeout) continue;
+        const bool presence = remote.valid && now - remote.last_presence <= kPeerTimeout;
+        const bool host = presence && remote.protocol_v3 && (remote.flags & kSessionFlagIsHost);
+        const bool incompatible = presence &&
+            (!remote.protocol_v3 || strcmp(remote.game_build, kGameBuild) ||
+             strcmp(remote.mod_version, kModVersion));
+        bool on_lan = false;
+        for (size_t j = 0; j < address_count; ++j) {
+            const auto& lan = addresses[j];
+            if (same_subnet(lan.address.s_addr, lan.mask.s_addr, peer.raw.sin_addr.s_addr)) {
+                on_lan = true;
+                break;
+            }
+        }
+        ++visible.total;
+        visible.hosts += host;
+        visible.incompatible += incompatible;
+        visible.compatible_hosts += host && !incompatible;
+        visible.same_subnet_hosts += host && !incompatible && on_lan;
+        visible.same_subnet_peers += on_lan;
+        LOG_INFO("connection check: peer=%08x IPv4=%s host=%d incompatible=%d same_subnet=%d",
+                 peer.id, peer.address, host, incompatible, on_lan);
+    }
+    pthread_mutex_unlock(&g_peers_lock);
+    LOG_INFO("connection check: visible=%u hosts=%u lan_interfaces=%zu tunnel_interface=%d",
+             visible.total, visible.hosts, address_count, tunnel);
+    switch (diagnose(address_count != 0, visible)) {
+        case Discovery::NoLanAddress: return WorldNotice::GuestNoLan;
+        case Discovery::NoPeers: return WorldNotice::GuestNoPeers;
+        case Discovery::OtherSubnet: return WorldNotice::GuestOtherSubnet;
+        case Discovery::IncompatibleHost: return WorldNotice::GuestIncompatible;
+        case Discovery::HostNotReady: return WorldNotice::GuestNoHostWorld;
+        case Discovery::JoinUnanswered: return WorldNotice::GuestJoinUnanswered;
+    }
+    return WorldNotice::GuestJoinUnanswered;
+}
+
+void connection_check_tick(double now) {
+    using namespace connection_check;
+    static Wait wait;
+    static uint8_t host_session[16]{};
+    Stage stage = Stage::Idle;
+    uint64_t progress = 0;
+    bool host_waiting = false;
+    uint8_t current_session[16]{};
+    pthread_mutex_lock(&g_session.lock);
+    const auto state = g_session.state;
+    const auto reason = g_session.reason;
+    const uint32_t host_id = g_session.host_id;
+    const bool guest = g_session.launch_role != kLaunchHost && !g_session.local_host &&
+        !g_session.local_has_world &&
+        (g_session.launch_role == kLaunchGuest || g_session.selected || g_session.join_accepted) &&
+        !g_session.explicit_leave && now >= g_session.leave_cooldown_until;
+    if (guest && g_session.join_accepted) {
+        pthread_mutex_lock(&g_handoff_lock);
+        const auto handoff = g_handoff_state;
+        pthread_mutex_unlock(&g_handoff_lock);
+        stage = handoff == kWorldHandoffWritten ? Stage::GuestLoad : Stage::GuestTransfer;
+        progress = uint64_t(host_id) << 32;
+        if (stage == Stage::GuestTransfer && g_connection_progress_host == host_id)
+            progress |= g_connection_received_chunks;
+    } else if (guest && !g_session.world_active) {
+        stage = Stage::GuestDiscovery;
+    } else if (g_session.local_host && g_session.local_has_world && g_session.local_member) {
+        host_waiting = true;
+        memcpy(current_session, g_session.session_id, sizeof(current_session));
+    }
+    pthread_mutex_unlock(&g_session.lock);
+
+    if (host_waiting) {
+        stage = Stage::HostWaiting;
+        if (!same_session(host_session, current_session)) {
+            memcpy(host_session, current_session, sizeof(host_session));
+            wait = {};
+        }
+        pthread_mutex_lock(&g_peers_lock);
+        for (size_t i = 0; i < kMaxPeers; ++i) {
+            if (g_peers[i].active && now - g_peers[i].last_seen <= kPeerTimeout &&
+                g_remote[i].join_accepted &&
+                same_session(g_remote[i].admitted_session, current_session)) {
+                stage = Stage::Idle;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_peers_lock);
+    }
+    if (!wait.update(stage, progress, now)) return;
+
+    WorldNotice notice;
+    switch (stage) {
+        case Stage::GuestDiscovery: notice = check_guest_discovery(now); break;
+        case Stage::GuestTransfer: notice = WorldNotice::GuestTransferStalled; break;
+        case Stage::GuestLoad: notice = WorldNotice::GuestLoadStalled; break;
+        case Stage::HostWaiting: notice = WorldNotice::HostNoGuest; break;
+        case Stage::Idle: return;
+    }
+    char detail[128]{}, handoff[128]{};
+    net_session_detail(detail, sizeof(detail));
+    net_world_handoff_detail(handoff, sizeof(handoff));
+    LOG_WARN("connection check: after %.0fs stage=%u notice=%u state=%u reason=%u host=%08x "
+             "peers=%zu session=%s handoff=%s", now - wait.since, unsigned(stage),
+             unsigned(notice), unsigned(state), unsigned(reason), host_id, net_peer_count(),
+             detail, handoff);
+    push_world_notice(notice);
+}
+
 void* pump_main(void* unused) {
     (void)unused;
     // Was 512, which silently truncated every datagram longer than that. A world chunk plus
@@ -3071,6 +3233,7 @@ void* pump_main(void* unused) {
     uint64_t iterations = 0;
     double next_report = monotonic_seconds() + 5.0;
     double next_pose_report = monotonic_seconds() + 15.0;
+    double next_connection_check = 0;
 
     while (g_pump_running) {
         g_pump_beat_ms = MonotonicMs();
@@ -3201,6 +3364,10 @@ void* pump_main(void* unused) {
         // Repeat whatever the peers have not acknowledged. After drop_stale_peers so the mask
         // it reads excludes peers that just timed out.
         drop_stale_peers(now);
+        if (now >= next_connection_check) {
+            connection_check_tick(now);
+            next_connection_check = now + 1.0;
+        }
         drop_stale_vehicles(now);
         service_world_events(now);
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
@@ -3270,7 +3437,19 @@ bool net_geometry_enqueue(const base_geometry::GhostEnvelope& envelope) {
     return geometry_enqueue(envelope);
 }
 bool net_creature_probe_send(const creature_motion::Message& message) {return creature_motion_enqueue(message);}
-bool net_creature_probe_take(creature_motion::Message* message) {return creature_motion_take(message);}
+bool net_creature_probe_take(creature_motion::Message* message) {return creature_motion_take(message, false);}
+bool net_creature_pose_take(creature_motion::Message* message) {return creature_motion_take(message, true);}
+size_t net_copy_world_peers(PeerState* out, size_t max) {
+    if (!out || !max) return 0;
+    pthread_once(&g_peers_lock_once, init_peers_lock);
+    pthread_mutex_lock(&g_peers_lock);
+    size_t count = 0;
+    for (size_t i = 0; i < kMaxPeers && count < max; ++i)
+        if (session_peer_eligible_locked(i, true) && g_peers[i].seq_valid)
+            out[count++] = g_peers[i];
+    pthread_mutex_unlock(&g_peers_lock);
+    return count;
+}
 bool net_geometry_take(uint32_t* origin, base_geometry::GhostEnvelope* out) {
     return geometry_take(origin, out);
 }
@@ -3308,7 +3487,7 @@ void net_post_world_event(const WorldEvent& event, bool already_applied) {
 }
 
 bool net_try_post_world_event(const WorldEvent& event) {
-    return event.kind==kWorldEventLockerContents && queue_local_event(event,true);
+    return (event.kind==kWorldEventLockerContents || event.kind==kWorldEventFishPickup) && queue_local_event(event,true);
 }
 uint32_t net_session_host_id() {
     pthread_mutex_lock(&g_session.lock);

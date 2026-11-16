@@ -245,7 +245,7 @@ int main() {
     assert(decoded[0].reserved16==length&&!memcmp(reinterpret_cast<uint8_t*>(decoded)+start,reinterpret_cast<uint8_t*>(&contents)+start,length));
     // Single-creature channel uses real UDP and the same session/endpoint gate.
     namespace cm=creature_motion;
-    g_creature_motion_tx.clear();g_creature_motion_rx.clear();
+    g_creature_motion_tx={};g_creature_motion_rx={};
     cm::Message request;request.host=request.target=1;request.sender=3;
     request.epoch=g_session.epoch;memcpy(request.session.data(),g_session.session_id,16);
     request.nonce=0x1234567812345678ULL;request.fish[0]=4;request.prefab[0]=5;
@@ -265,6 +265,31 @@ int main() {
     activate(c,a);++g_session.epoch;feed(packets,a);assert(!net_creature_probe_take(&received));
     // Old outbound session cannot be enqueued after a context transition.
     assert(!net_creature_probe_send(request));
+    // An idle pump or an in-flight prefix must not delay the first send of a
+    // pickup command. Drop the first packet and deliver the new tail out of order.
+    read_packets(a);read_packets(b);
+    ++g_session.epoch;activate(a,b);
+    const double now=monotonic_seconds();
+    service_world_events(now);read_packets(b); // idle heartbeat
+    post(kWorldEventFishPickup);service_world_events(now+.010);
+    auto first=read_packets(b);assert(first.size()==1);
+    post(kWorldEventFishPickup);service_world_events(now+.020);
+    auto tail=read_packets(b);assert(tail.size()==1);
+    activate(b,a);feed(tail,a);assert(delivered().empty());
+    read_packets(a); // Keep the sender's watermark at zero.
+    activate(a,b);
+    for(int i=2;i<kEventSendWindow+1;++i)post(kWorldEventFishPickup);
+    service_world_events(now+.030);
+    assert(read_packets(b).size()==kEventSendWindow-2);
+    service_world_events(now+.040);assert(read_packets(b).empty());
+    service_world_events(now+.010+kEventResendInterval+.001);
+    packets=read_packets(b);assert(packets.size()==kEventSendWindow);
+    activate(b,a);feed(packets,a);
+    assert((delivered()==std::vector<uint32_t>{1,2,3,4,5,6,7,8}));
+    packets=read_packets(a);activate(a,b);feed(packets,b);
+    service_world_events(now+.010+kEventResendInterval+.012);
+    packets=read_packets(b);assert(packets.size()==1);
+    activate(b,a);feed(packets,a);assert((delivered()==std::vector<uint32_t>{9}));
     close(a.socket); close(b.socket); close(c.socket);
     puts("PASS: real UDP ordered first packet, lost ACK, 31s outage, offline actions, endpoint/slot reuse, new recipient baseline, forged ACK gates, bounded history gap and session reset");
 }

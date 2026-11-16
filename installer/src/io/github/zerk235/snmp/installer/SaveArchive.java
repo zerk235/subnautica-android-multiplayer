@@ -34,7 +34,10 @@ final class SaveArchive {
         StructStat stat=Os.lstat(dir.getAbsolutePath());
         if(!OsConstants.S_ISDIR(stat.st_mode)) throw new IOException("Папка миров недоступна или является ссылкой");
         File[] entries=dir.listFiles();
-        if(entries==null) throw new IOException("Android не разрешил чтение папки миров");
+        if(entries==null) throw new IOException("Android не разрешил чтение папки миров: "
+            + root.toPath().relativize(dir.toPath()) + "; uid=" + stat.st_uid + ", gid=" + stat.st_gid
+            + ", mode=" + Integer.toOctalString(stat.st_mode & 07777)
+            + ". Откройте обновлённую игру до главного меню для восстановления доступа копирования");
         Arrays.sort(entries,Comparator.comparing(File::getName));
         for(File file:entries) {
             StructStat info=Os.lstat(file.getAbsolutePath());
@@ -175,11 +178,13 @@ final class SaveArchive {
         }
         // Without CAP_CHOWN, grant the game access through the mode bits. Android's
         // app-specific external storage still mediates access to this package's directory.
-        int mode=root ? (directory?02770:0660) : (directory?0777:0666);
+        // Keep setgid on every directory: game-created slots/options must inherit
+        // the external-data group so Shizuku can read later saves too.
+        int mode=root ? (directory?02770:0660) : (directory?02777:0666);
         if(root) Os.chown(path,gameUid,gameGid);
         Os.chmod(path,mode);
         StructStat checked=Os.lstat(path);
-        if((checked.st_mode & 0777)!=(mode & 0777) || (root && (checked.st_uid!=gameUid || checked.st_gid!=gameGid)))
+        if((checked.st_mode & 07777)!=mode || (root && (checked.st_uid!=gameUid || checked.st_gid!=gameGid)))
             throw new IOException("Android не применил права доступа игры к восстановленному миру");
     }
 }

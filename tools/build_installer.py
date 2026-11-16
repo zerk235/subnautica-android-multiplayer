@@ -66,6 +66,9 @@ def main():
         ET.SubElement(manifest.getroot(), "instrumentation", {
             ANDROID + "name": "io.github.zerk235.snmp.installer.DiagnosticsTests",
             ANDROID + "targetPackage": "io.github.zerk235.snmp.installer"})
+        ET.SubElement(manifest.getroot(), "instrumentation", {
+            ANDROID + "name": "io.github.zerk235.snmp.installer.NativeUpdatePreparation",
+            ANDROID + "targetPackage": "io.github.zerk235.snmp.installer"})
     manifest.write(out / "AndroidManifest.xml", encoding="utf-8", xml_declaration=True)
     shutil.copyfile(library, out / "assets/libsnmod.so")
     (out / "assets/mod.json").write_text(json.dumps({"buildId": identity, "sha256": hashlib.sha256(library.read_bytes()).hexdigest(), "protocol": session_protocol()}), encoding="utf-8")

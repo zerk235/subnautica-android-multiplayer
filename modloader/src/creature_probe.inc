@@ -85,6 +85,25 @@ void probe_finish(const char* reason) {
     p.active=false;p.requested=0;p.fish=nullptr;p.body=nullptr;p.count=0;
     if(p.roots)for(int i=0;i<50;++i)probe_root(i,nullptr);
 }
+template<class Add>
+bool boomerang_components(void* chosen, void* go, Add add) {
+    auto& p = g_creature_probe;
+    void* actions = p.components.call(go, p.action_type, true, p.components.method);
+    if (!actions) return false;
+    const int count = g_array_get_length.call(actions, g_array_get_length.method);
+    if (count < 0 || count > 32) return false;
+    add(chosen);
+    for (int i = 0; i < count; ++i) add(g_array_get_value.call(actions, i, g_array_get_value.method));
+    const char* names[] = {"SwimBehaviour", "SplineFollowing", "Locomotion", "WorldForces", "EcoTarget", "Pickupable"};
+    for (const char* name : names) {
+        auto* klass = build_class(name);
+        if (!klass) return false;
+        void* type = il2cpp_type_get_object(il2cpp_class_get_type(klass));
+        if (!type) return false;
+        add(g_get_component.call(go, type, g_get_component.method));
+    }
+    return true;
+}
 bool probe_bind(void* chosen,float distance) {
     auto& p=g_creature_probe;if(!chosen)return false;
     void* go=g_get_game_object.call(chosen,g_get_game_object.method);
@@ -92,12 +111,11 @@ bool probe_bind(void* chosen,float distance) {
     if(!probe_exists(body))return false;
     std::string id;if(!contents_id(chosen,&id))return false;
     snprintf(p.id,sizeof(p.id),"%s",id.c_str());p.fish=chosen;p.body=body;
-    p.count=0;probe_root(0,chosen);probe_root(1,body);probe_add(chosen);
-    void* actions=p.components.call(go,p.action_type,true,p.components.method);
-    if(actions){int count=g_array_get_length.call(actions,g_array_get_length.method);if(count>32){probe_finish("too many actions");return false;}
-        for(int i=0;i<count;++i)probe_add(g_array_get_value.call(actions,i,g_array_get_value.method));}
-    const char* names[]={"SwimBehaviour","SplineFollowing","Locomotion","WorldForces","EcoTarget","Pickupable"};
-    for(const auto* name:names){auto* c=build_class(name);if(!c)continue;void* type=il2cpp_type_get_object(il2cpp_class_get_type(c));probe_add(g_get_component.call(go,type,g_get_component.method));}
+    p.count=0;probe_root(0,chosen);probe_root(1,body);
+    if (!boomerang_components(chosen, go, probe_add)) {
+        probe_finish("component discovery failed");
+        return false;
+    }
     p.kinematic=g_rb_get_kinematic.call(body,g_rb_get_kinematic.method);
     p.active=true;p.started=build_now();p.next=p.started;p.maximum_drift=0;p.reenabled=0;
     p.initial=g_get_position.call(g_get_transform.call(chosen,g_get_transform.method),g_get_position.method);
@@ -132,7 +150,9 @@ void tick_creature_probe(const LocalState& local) try {
         p.next_file=now+1;FILE* file=fopen(kCreatureProbeRequest,"rb");
         if(file){char request[64]{};size_t n=fread(request,1,sizeof(request)-1,file);fclose(file);unlink(kCreatureProbeRequest);
             constexpr char command[]="freeze-boomerang-20s";
-            if(n==sizeof(command)-1&&!memcmp(request,command,sizeof(command)-1)){p.requested=now;LOG_INFO("creature probe: armed for 120s; searching within 25m");}}
+            if(n==sizeof(command)-1&&!memcmp(request,command,sizeof(command)-1)){
+                reset_boomerang_sync();
+                p.requested=now;LOG_INFO("creature probe: armed for 120s; searching within 25m");}}
     }
     if(!p.active){if(p.requested&&now-p.requested<120&&now>=p.next){p.next=now+1;probe_select(local);}else if(p.requested&&now-p.requested>=120){LOG_INFO("creature probe: no suitable fish within 25m; request expired");p.requested=0;}return;}
     if(!probe_exists(p.fish)||!probe_exists(p.body)){probe_finish("object unloaded/destroyed");return;}

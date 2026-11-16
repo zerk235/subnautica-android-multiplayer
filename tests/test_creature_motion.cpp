@@ -49,4 +49,87 @@ int main(){
     assert(gap.sample(5.275,&sample)&&sample.position[0]>14&&sample.position[0]<17);
     assert(gap.sample(5.46,&sample)&&sample.position[0]==30);
     pose.sequence=4;assert(!gap.accept(pose,5)); // Local receive clock cannot roll backwards.
+
+    Message live = pose;
+    live.kind = LivePose;
+    live.target = 0;
+    live.nonce = 1;
+    live.sequence = 100;
+    assert(encode(live, &wire) && decode(wire.data(), wire.size(), &decoded));
+    assert(permitted(decoded, 2, 1, live.session, live.epoch));
+    assert(permitted(decoded, 3, 1, live.session, live.epoch));
+    assert(!permitted(decoded, 1, 1, live.session, live.epoch));
+    bad = live; bad.target = 2; assert(!valid(bad));
+    bad = live; bad.sender = 2; assert(!valid(bad));
+    bad = live; bad.elapsed_ms = 1; assert(!valid(bad));
+    Receiver runtime;
+    runtime.reset(live);
+    assert(runtime.accept(decoded, 1));
+    bad = live; bad.sequence--; assert(!runtime.accept(bad, 2));
+    bad = live; bad.sequence++; bad.fish[0]++; assert(!runtime.accept(bad, 2));
+    bad = live; bad.sequence++; bad.kind = Pose; bad.target = 2; assert(!runtime.accept(bad, 2));
+    assert(runtime.sample(10, &sample) && sample.sequence == live.sequence);
+    // Slow frames and reordered UDP cannot roll a pending pose backwards.
+    Mailbox inbox;
+    assert(inbox.push(live));
+    bad = live; bad.sequence += 2; bad.position[0] = 9; assert(inbox.push(bad));
+    bad.sequence--; bad.position[0] = 8; assert(inbox.push(bad));
+    assert(!inbox.take(false, &sample));
+    assert(inbox.take(true, &sample) && sample.sequence == live.sequence + 2 && sample.position[0] == 9);
+    assert(!inbox.take(true, &sample));
+    SequenceGate sequences;
+    live.sequence = 0xffffffffu;
+    assert(sequences.accept(live) && !sequences.accept(live));
+    bad = live; bad.sequence = 1; assert(sequences.accept(bad));
+    assert(!sequences.accept(live)); // Stream-out must not reset the floor.
+    bad.sequence = 2; bad.prefab[0]++; assert(!sequences.accept(bad));
+    sequences = {};
+    assert(sequences.accept(live)); // New world/session starts a fresh stream.
+    for (unsigned i = 0; i < kControlQueueCapacity; ++i) {
+        auto control = request; control.nonce = i + 1;
+        assert(inbox.push(control));
+    }
+    for (unsigned i = 0; i < kLiveQueueCapacity; ++i) {
+        bad = live; bad.fish[0] = uint8_t(i + 1); assert(inbox.push(bad));
+    }
+    bad = live; bad.fish[0] = 99; assert(!inbox.push(bad));
+    bad = request; bad.nonce = 99; assert(!inbox.push(bad));
+    for (size_t i = 0; i < kControlQueueCapacity; ++i) assert(inbox.take(false, &sample));
+    assert(!inbox.take(false, &sample));
+    // A full live mailbox must still replace a pending fish with its newest pose.
+    bad = live; bad.fish[0] = 40; bad.sequence = 2; assert(inbox.push(bad));
+    for (size_t i = 0; i < kLiveQueueCapacity; ++i) {
+        assert(inbox.take(true, &sample));
+        if (sample.fish[0] == 40) assert(sample.sequence == 2);
+    }
+    assert(!inbox.take(true, &sample));
+
+    // Forty unique fish all get a turn under the per-tick budget. Reordering
+    // the interest list cannot reset deadlines or send a duplicate burst.
+    std::array<Id, 41> ids{};
+    for (size_t i=0;i<ids.size();++i) ids[i][0]=uint8_t(i+1);
+    LiveSchedule schedule;schedule.refresh(ids.data(),ids.size());
+    std::array<unsigned,40> counts{};size_t index=99;
+    for(int tick=0;tick<5;++tick)
+        for(size_t i=0;i<kLiveSendPerTick;++i) {
+            assert(schedule.take(tick*.02,&index)&&index<40);
+            ++counts[index];
+        }
+    for(auto value:counts)assert(value==1);
+    assert(!schedule.take(.09,&index));
+    std::reverse(ids.begin(),ids.begin()+40);
+    schedule.refresh(ids.data(),40);
+    assert(!schedule.take(.09,&index));
+    assert(schedule.take(.1,&index)&&ids[index][0]<=8);
+    // A long stall sends a current sample once per fish, without backlog catchup.
+    counts={};
+    for(size_t i=0;i<40;++i) {assert(schedule.take(20,&index));++counts[index];}
+    assert(!schedule.take(20,&index));
+    for(auto value:counts)assert(value==1);
+    assert(!schedule.take(std::numeric_limits<double>::quiet_NaN(),&index));
+    assert(!schedule.take(-1,&index));
+    schedule.refresh(nullptr,40);assert(!schedule.take(30,&index));
+    ids[0]={};ids[1]=ids[2];schedule.refresh(ids.data(),3);
+    assert(schedule.take(30,&index)&&index==1);
+    assert(!schedule.take(30,&index)); // Empty and duplicate identities ignored.
 }

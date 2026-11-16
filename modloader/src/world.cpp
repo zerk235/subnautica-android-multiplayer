@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "log.h"
+#include "save_backup_access.h"
 
 namespace {
 
@@ -831,6 +832,7 @@ bool world_write_slot(const WorldManifest& manifest,bool preserve_local) {
                  manifest.slot, backup);
     }
 
+    world_prepare_backup_access();
     release_receive();
     return true;
 
@@ -855,3 +857,11 @@ uint32_t world_receive_received(int file_index) {
 }
 
 void world_reset_receive() { release_receive(); }
+
+void world_prepare_backup_access() {
+    const auto result = save_backup_access::repair(kSavesRoot);
+    if (result.changed || result.errors)
+        LOG_INFO("save access: checked=%u changed=%u errors=%u first=%s errno=%d (%s)",
+            result.checked, result.changed, result.errors, result.path.c_str(),
+            result.error, result.error ? strerror(result.error) : "none");
+}

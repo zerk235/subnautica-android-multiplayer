@@ -38,6 +38,10 @@ int main(){
     receive(p,m);assert(world_receive_verify(m));
     auto wrong=m;wrong.files[0].checksum++;assert(!world_write_slot(wrong));
     assert(world_write_slot(m)&&world_slot_is_host_received("guest"));
+    struct stat copied_access{};
+    assert(!stat((root+"/guest/CellsCache/"+entries[0].name).c_str(),&copied_access));
+    assert((copied_access.st_gid==save_backup_access::kExternalDataGroup && (copied_access.st_mode&S_IRGRP)) ||
+           (copied_access.st_mode&S_IROTH)); // Received cells remain readable for the next Shizuku backup.
     assert(world_slot_exists("guest",m)==kWorldSlotMatches);
     assert(get(root+"/guest/CellsCache/"+entries[0].name)==get(root+"/source/CellsCache/"+entries[0].name));
     assert(access((root+"/guest/snmod-cells.bin").c_str(),F_OK)!=0); // archive is not a game save file

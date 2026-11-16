@@ -46,6 +46,7 @@ public final class SaveTests extends Instrumentation {
                 staging->SaveArchive.prepareGameAccess(staging,-1,-1,false));
             check(report.getInt("files")==4 && SaveArchive.same(before,SaveArchive.inventory(target)),"restored data");
             check((Os.stat(target.getAbsolutePath()).st_mode & 0777)==0777,"shell restore directory mode");
+            check((Os.stat(target.getAbsolutePath()).st_mode & 02000)!=0,"shell restore must preserve GID for future game saves");
             check((Os.stat(new File(target,"slotA/CellsCache/cell.zip").getAbsolutePath()).st_mode & 0777)==0666,"shell restore file mode");
             check(new File(parent,report.getString("previous")+"/old-world/data").isFile(),"previous worlds not retained");
             String prior=ApkPatcher.sha256(new File(target,"slotA/gameinfo.json"));

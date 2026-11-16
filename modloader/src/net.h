@@ -23,7 +23,7 @@ constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 33;  // Native base-face Bioreactor and shared fuel
+constexpr uint16_t kSessionProtocolVersion = 36;  // Boomerang and Peeper sync
 #else
 constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
 #endif
@@ -150,8 +150,10 @@ uint32_t net_local_id();
 bool net_geometry_enqueue(const base_geometry::GhostEnvelope& envelope);
 bool net_geometry_take(uint32_t* origin, base_geometry::GhostEnvelope* out);
 bool net_geometry_session(uint8_t out_id[16], uint32_t* epoch);
+size_t net_copy_world_peers(PeerState* out, size_t max);
 bool net_creature_probe_send(const creature_motion::Message& message);
 bool net_creature_probe_take(creature_motion::Message* message);
+bool net_creature_pose_take(creature_motion::Message* message);
 #endif
 
 enum SessionState {
@@ -278,7 +280,9 @@ void net_world_handoff_detail(char* out, size_t capacity);
 void net_world_handoff_clear();
 
 enum class WorldNotice {
-    HostFound, GuestFound, Sending, Receiving, Received, Sent, ReceiveFailed, SendFailed
+    HostFound, GuestFound, Sending, Receiving, Received, Sent, ReceiveFailed, SendFailed,
+    GuestNoLan, GuestNoPeers, GuestOtherSubnet, GuestIncompatible, GuestNoHostWorld,
+    GuestJoinUnanswered, GuestTransferStalled, GuestLoadStalled, HostNoGuest
 };
 
 // Game-thread consumer. Network callbacks never call Unity.
@@ -323,6 +327,7 @@ enum WorldEventKind : uint8_t {
     // real class so the game's own deconstruction path rebuilds the base geometry.
     kWorldEventRemove = 5,
     kWorldEventLockerContents = 6,
+    kWorldEventFishPickup = 7,
 };
 
 // build_flags bits for the build kinds. complete/isInside/forceUpright/rotatable/attached

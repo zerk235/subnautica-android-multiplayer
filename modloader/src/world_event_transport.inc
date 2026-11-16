@@ -164,19 +164,22 @@ void service_world_events(double now) {
             send_to(&status, sizeof(status), peers[i].address);
             r->last_status = now;
         }
-        if (r->history_lost || (r->last_send >= 0 && now - r->last_send < kEventResendInterval))
-            continue;
-        // Small sliding window, always from the missing prefix in sequence order.
-        // There is no time expiry, including when discovery retires the peer slot.
-        uint32_t sequence = r->acknowledged;
-        for (int n = 0; n < kEventSendWindow && sequence < g_events.next_sequence; ++n) {
+        if (r->history_lost || r->acknowledged >= g_events.next_sequence) continue;
+        // Only already-sent packets need the retry delay. New packets can fill the
+        // same bounded window immediately, even if the previous ACK is in flight.
+        // Sending the new tail must not postpone recovery of a missing prefix.
+        const bool retry_due = r->last_send < 0 || now - r->last_send >= kEventResendInterval;
+        const uint32_t outstanding = g_events.next_sequence - r->acknowledged;
+        const uint32_t end = r->acknowledged + (outstanding < kEventSendWindow ? outstanding : kEventSendWindow);
+        uint32_t sequence = retry_due ? r->acknowledged : r->sent_through;
+        while (sequence < end) {
             ++sequence;
             const auto& slot = g_events.slots[(sequence - 1) & kEventRingMask];
             if (!slot.used || slot.event.sequence != sequence) { event_history_lost(*r); break; }
             send_world_event(slot, *r, peers[i].address);
             if (sequence > r->sent_through) r->sent_through = sequence;
         }
-        r->last_send = now;
+        if (retry_due) r->last_send = now;
     }
     pthread_mutex_unlock(&g_event_lock);
 }

@@ -170,7 +170,7 @@ final class Diagnostics {
                         Enumeration<? extends ZipEntry> entries=zip.entries(); int count=0,total=0;
                         while(entries.hasMoreElements()) {
                             ZipEntry entry=entries.nextElement(); String name=entry.getName();
-                            if(++count>10 || !allowedGameEntry(name)) throw new IOException("Неверный состав диагностического архива игры");
+                            if(++count>42 || !allowedGameEntry(name)) throw new IOException("Неверный состав диагностического архива игры");
                             byte[] bytes=ApkPatcher.readSmall(zip.getInputStream(entry),DiagnosticLogs.LOG_LIMIT);
                             total+=bytes.length; if(total>24*1024*1024) throw new IOException("Диагностический архив игры слишком большой");
                             DiagnosticLogs.entry(out,name,bytes);
@@ -209,6 +209,7 @@ final class Diagnostics {
     }
     static boolean allowedGameEntry(String name) {
         return name.equals("game/capture.json") || name.equals("game/log_findings.json") || name.matches("game/logcat_[0-9]+\\.txt")
+            || name.matches("game/mod_log/fish_pickup/[0-9a-f]{32}-[0-9a-f]{32}-[0-9a-f]{8}-[0-9a-f]{16}\\.pending")
             || name.equals("game/mod_log/logs/modloader.log") || name.equals("game/Player.log") || name.equals("game/Unity/Player.log");
     }
     static String summary(JSONObject report) {
