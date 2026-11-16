@@ -28,6 +28,15 @@ struct BoomerangReplica {
     std::vector<BoomerangSaved> renderers;
     std::vector<BoomerangSaved> animators; // Saved applyRootMotion, not enabled.
 };
+struct HostFishSample {
+    fish_motion::Message identity;
+    void* fish = nullptr;
+    void* game_object = nullptr;
+    void* transform = nullptr;
+    void* health = nullptr;
+    void* waterpark = nullptr;
+    void* pickup = nullptr;
+};
 struct BoomerangSync {
     bool runtime_ready = false;
     Entry<bool (*)(void*, void**, void*)> find_identifier;
@@ -38,19 +47,23 @@ struct BoomerangSync {
     Entry<void (*)(void*, int, void*)> hide_flags;
     Entry<void (*)(void*, int, void*)> set_interpolation;
     Entry<int (*)(void*, void*)> get_interpolation;
+    Entry<float (*)(void*)> get_time_scale;
     Entry<void (*)(void*, bool, void*)> set_root_motion;
     Entry<void (*)(void*, bool, void*)> set_collider;
     void* mono_type = nullptr;
     void* peeper_type = nullptr;
+    void* bladderfish_type = nullptr;
     Entry<PredicateFn> peeper_hero, peeper_born_hero, peeper_in_prison;
     ManagedRoot staging;
+    ManagedRoot advertised_roots;
     fish_motion::Id session{};
     uint32_t epoch = 0, host = 0, generation = 0, sequence = 0;
     double next_scan = 0, next_send = 0, next_report = 0, next_spawn = 0;
-    std::array<fish_motion::Message, fish_motion::kLiveFishLimit> advertised;
+    std::array<HostFishSample, fish_motion::kLiveFishLimit> advertised;
     fish_motion::LiveSchedule schedule;
     size_t advertised_count = 0;
     size_t sent_since_report = 0;
+    double max_publish_ms = 0;
     std::vector<BoomerangReplica> replicas;
     fish_motion::SequenceGate sequences;
 } g_boomerang;
@@ -96,6 +109,10 @@ void* boomerang_staging_parent() {
 
 bool resolve_boomerang_sync() {
     auto& sync = g_boomerang;
+    if (!sync.bladderfish_type) {
+        if (auto* bladderfish = build_class("Bladderfish"))
+            sync.bladderfish_type = il2cpp_type_get_object(il2cpp_class_get_type(bladderfish));
+    }
     if (sync.find_identifier && sync.active && sync.get_renderer && sync.set_renderer &&
         sync.get_collisions && sync.set_collisions && sync.get_interpolation && sync.set_interpolation &&
         sync.set_root_motion && g_anim_get_root_motion && g_animator_type_obj) return true;
@@ -118,13 +135,19 @@ bool resolve_boomerang_sync() {
     sync.get_interpolation.bind(find_method(body, "get_interpolation", 0));
     sync.set_interpolation.bind(find_method(body, "set_interpolation", 1));
     sync.set_root_motion.bind(find_method(g_animator_class, "set_applyRootMotion", 1));
+    sync.get_time_scale.bind(find_method(find_class_in_domain("UnityEngine", "Time"), "get_timeScale", 0));
     return sync.find_identifier && sync.active && sync.get_renderer && sync.set_renderer &&
            sync.get_collisions && sync.set_collisions && sync.get_interpolation && sync.set_interpolation &&
            sync.set_root_motion && g_anim_get_root_motion && g_animator_type_obj;
 }
 
 void* synchronized_fish_type(fish_motion::Species species) {
-    return species == fish_motion::Species::Peeper ? g_boomerang.peeper_type : g_creature_probe.fish_type;
+    switch (species) {
+        case fish_motion::Species::Boomerang: return g_creature_probe.fish_type;
+        case fish_motion::Species::Peeper: return g_boomerang.peeper_type;
+        case fish_motion::Species::Bladderfish: return g_boomerang.bladderfish_type;
+        default: return nullptr;
+    }
 }
 
 bool ordinary_peeper(void* fish) {
@@ -135,7 +158,7 @@ bool ordinary_peeper(void* fish) {
            !sync.peeper_in_prison.call(fish, sync.peeper_in_prison.method);
 }
 
-bool wild_synchronized_fish(void* fish, void* go, fish_motion::Species species) {
+bool wild_synchronized_fish(void* fish, void* go, fish_motion::Species species, HostFishSample* sample = nullptr) {
     const auto& probe = g_creature_probe;
     const auto& sync = g_boomerang;
     if (!probe_exists(fish) || !probe_exists(go) ||
@@ -143,8 +166,14 @@ bool wild_synchronized_fish(void* fish, void* go, fish_motion::Species species) 
     void* live = g_get_component.call(go, probe.live_type, g_get_component.method);
     if (!probe_exists(live) || !probe.alive.call(live, probe.alive.method)) return false;
     void* park = g_get_component.call(go, probe.waterpark_type, g_get_component.method);
-    return (!park || !contents_field(park, probe.waterpark_field)) &&
-           (species != fish_motion::Species::Peeper || ordinary_peeper(fish));
+    if ((park && contents_field(park, probe.waterpark_field)) ||
+        (species == fish_motion::Species::Peeper && !ordinary_peeper(fish))) return false;
+    if (sample) {
+        sample->health = live;
+        sample->waterpark = park;
+        sample->pickup = g_get_component.call(go, g_pickupable_type, g_get_component.method);
+    }
+    return true;
 }
 
 void release_boomerang(BoomerangReplica& replica) {
@@ -197,12 +226,14 @@ void reset_boomerang_sync() {
     sync.replicas.clear();
     destroy_boomerang_visual(sync.staging.get());
     sync.staging.clear();
+    sync.advertised_roots.clear();
     sync.sequences = {};
     sync.host = sync.epoch = 0;
     sync.runtime_ready = false;
     sync.next_scan = sync.next_send = sync.next_report = sync.next_spawn = 0;
     sync.advertised_count = 0;
     sync.sent_since_report = 0;
+    sync.max_publish_ms = 0;
     sync.schedule = {};
 }
 
@@ -475,7 +506,7 @@ BoomerangReplica* boomerang_record(const fish_motion::Message& identity, double 
 
 template<class Visit>
 void for_each_synchronized_fish(Visit visit) {
-    for (auto species : {fish_motion::Species::Boomerang, fish_motion::Species::Peeper}) {
+    for (auto species : fish_motion::kLiveSpecies) {
         void* type = synchronized_fish_type(species);
         if (!type) continue;
         void* list = g_find_objects_all.call(type, false, g_find_objects_all.method);
@@ -524,6 +555,7 @@ void publish_boomerangs(const LocalState& local, double now) {
     PeerState peers[kMaxPeers]{};
     const size_t count = net_copy_world_peers(peers, kMaxPeers);
     if (!count) {
+        sync.advertised_roots.clear();
         sync.advertised_count = 0;
         sync.schedule = {};
         sync.next_scan = 0;
@@ -531,8 +563,17 @@ void publish_boomerangs(const LocalState& local, double now) {
     }
     if (now >= sync.next_scan) {
         sync.next_scan = now + 1;
+        const size_t previous_count = sync.advertised_count;
         sync.advertised_count = 0;
-        using Candidate = std::pair<float, fish_motion::Message>;
+        // Retain selected Unity objects in one array across frames. A disconnected
+        // guest, a new world, or an empty selection drops all retained references.
+        constexpr int kObjectsPerFish = 6;
+        if (!sync.advertised_roots.get()) {
+            auto* object_class = find_class_in_domain("System", "Object");
+            if (!object_class || !prefab_retain(sync.advertised_roots,
+                il2cpp_array_new(object_class, kObjectsPerFish * fish_motion::kLiveFishLimit))) return;
+        }
+        using Candidate = std::pair<float, HostFishSample>;
         std::vector<Candidate> candidates;
         for_each_synchronized_fish([&](void* fish, fish_motion::Species species) {
             void* tr = g_get_transform.call(fish, g_get_transform.method);
@@ -544,28 +585,57 @@ void publish_boomerangs(const LocalState& local, double now) {
                 distance = std::min(distance, boomerang_distance_sq(pos, peers[p]));
             if (distance >= kBoomerangRange * kBoomerangRange) return;
             void* go = g_get_game_object.call(fish, g_get_game_object.method);
-            if (!wild_synchronized_fish(fish, go, species)) return;
-            fish_motion::Message identity;
-            identity.species = species;
+            HostFishSample sample;
+            if (!wild_synchronized_fish(fish, go, species, &sample)) return;
+            sample.fish = fish;
+            sample.game_object = go;
+            sample.transform = tr;
+            sample.identity.species = species;
             void* uid = g_get_component.call(go, g_unique_identifier_type, g_get_component.method);
-            if (boomerang_identity(uid, identity)) candidates.emplace_back(distance, identity);
+            if (!boomerang_identity(uid, sample.identity)) return;
+            void* registered = nullptr;
+            if (!sync.find_identifier.call(g_unique_get_id.call(uid,g_unique_get_id.method),
+                &registered,sync.find_identifier.method) || registered != uid) return;
+            candidates.emplace_back(distance, sample);
         });
         const size_t selected = std::min(candidates.size(), sync.advertised.size());
         std::partial_sort(candidates.begin(), candidates.begin() + selected, candidates.end(),
             [](const Candidate& a, const Candidate& b) { return a.first < b.first; });
-        for (size_t i = 0; i < selected; ++i) sync.advertised[sync.advertised_count++] = candidates[i].second;
+        void* roots = sync.advertised_roots.get();
+        const auto& set = g_contents_api.array_set;
+        int index = 0;
         std::array<fish_motion::Id, fish_motion::kLiveFishLimit> ids{};
-        for (size_t i = 0; i < sync.advertised_count; ++i) ids[i] = sync.advertised[i].fish;
+        for (size_t i = 0; i < selected; ++i) {
+            const auto& sample = candidates[i].second;
+            for (void* object : {sample.fish, sample.game_object, sample.transform,
+                                 sample.health, sample.waterpark, sample.pickup})
+                set.call(roots,object,index++,set.method);
+            sync.advertised[i] = sample;
+            ids[i] = sample.identity.fish;
+        }
+        for (; index < static_cast<int>(previous_count) * kObjectsPerFish; ++index)
+            set.call(roots,nullptr,index,set.method);
+        sync.advertised_count = selected;
+        if (!selected) sync.advertised_roots.clear();
         sync.schedule.refresh(ids.data(), sync.advertised_count);
     }
     size_t sent = 0;
     for (size_t n = 0, i = 0; n < fish_motion::kLiveSendPerTick && sync.schedule.take(now, &i); ++n) {
-        auto pose = sync.advertised[i];
+        const auto& sample = sync.advertised[i];
+        auto pose = sample.identity;
         if (fish_pickup_suppressed(pose)) continue;
-        void* fish = find_boomerang(pose);
-        if (!fish) continue;
-        void* tr = g_get_transform.call(fish, g_get_transform.method);
-        if (!probe_exists(tr)) continue;
+        const auto& probe = g_creature_probe;
+        if (!probe_exists(sample.game_object) || !sync.active.call(sample.game_object,sync.active.method) ||
+            !probe_exists(sample.fish) || !probe_exists(sample.transform) || !probe_exists(sample.health) ||
+            !probe.alive.call(sample.health,probe.alive.method) ||
+            (sample.waterpark && contents_field(sample.waterpark,probe.waterpark_field)) ||
+            (pose.species == fish_motion::Species::Peeper && !ordinary_peeper(sample.fish))) continue;
+        const auto& contents = g_contents_api;
+        if (sample.pickup && contents.pickup_inventory_item && contents.item_owner) {
+            void* item = contents_field(sample.pickup, contents.pickup_inventory_item);
+            if (contents_field(item, contents.item_owner)) continue;
+        } else if (object_in_local_inventory(sample.game_object)) continue;
+        void* tr = sample.transform;
         const Vector3 pos = g_get_position.call(tr, g_get_position.method);
         const Quaternion rot = g_get_rotation.call(tr, g_get_rotation.method);
         pose.kind = fish_motion::LivePose;
@@ -583,11 +653,16 @@ void publish_boomerangs(const LocalState& local, double now) {
         }
     }
     sync.sent_since_report += sent;
+    sync.max_publish_ms = std::max(sync.max_publish_ms, (build_now() - now) * 1000);
     if (now >= sync.next_report) {
         sync.next_report = now + 5;
-        LOG_INFO("boomerang sync: host peers=%zu poses=%zu selected=%zu limit=%zu interval_sent=%zu seq=%u",
-            count, sent, sync.advertised_count, fish_motion::kLiveFishLimit, sync.sent_since_report, sync.sequence);
+        const auto& scale = sync.get_time_scale;
+        const float time_scale = scale ? scale.call(scale.method) : -1;
+        LOG_INFO("boomerang sync: host peers=%zu poses=%zu selected=%zu limit=%zu interval_sent=%zu seq=%u max_publish_ms=%.2f time_scale=%.3f",
+            count, sent, sync.advertised_count, fish_motion::kLiveFishLimit, sync.sent_since_report, sync.sequence,
+            sync.max_publish_ms, time_scale);
         sync.sent_since_report = 0;
+        sync.max_publish_ms = 0;
     }
 }
 

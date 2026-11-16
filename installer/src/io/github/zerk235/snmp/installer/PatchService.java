@@ -74,9 +74,9 @@ public final class PatchService extends Service {
                     status(this,"Миры восстановлены: "+report.getInt("files")+" файлов, SHA256 совпал. Можно открывать игру. Прежняя папка и резервная копия сохранены.");
                 } else if("check-removal".equals(action)) {
                     getSharedPreferences("status",0).edit().remove("removalToken").commit();
-                    new SaveManager(this).checkRemoval(progress);
+                    String identity = new SaveManager(this).checkRemoval(progress);
                     getSharedPreferences("status",0).edit().putString("removalToken",intent.getStringExtra("token"))
-                        .putString("removalIdentity",engine.removalIdentity())
+                        .putString("removalIdentity",identity)
                         .putLong("removalReadyAt",SystemClock.elapsedRealtime()).apply();
                     status(this,"APK и актуальная копия миров проверены. Подтвердите удаление старой игры в системном окне.");
                 }

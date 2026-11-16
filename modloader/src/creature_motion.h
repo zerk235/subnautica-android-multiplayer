@@ -11,17 +11,26 @@
 
 namespace creature_motion {
 using Id=std::array<uint8_t,16>;
-enum class Species : uint8_t { Boomerang, Peeper };
+enum class Species : uint8_t { Boomerang, Peeper, Bladderfish, Unknown = 255 };
+constexpr std::array kLiveSpecies{Species::Boomerang, Species::Peeper, Species::Bladderfish};
 constexpr int kBoomerangTech = 2510;
 constexpr int kPeeperTech = 2504;
-constexpr bool supported_tech(int tech) {
-    return tech == kBoomerangTech || tech == kPeeperTech;
+constexpr int kBladderfishTech = 2515;
+constexpr int tech_for_species(Species species) {
+    switch (species) {
+        case Species::Boomerang: return kBoomerangTech;
+        case Species::Peeper: return kPeeperTech;
+        case Species::Bladderfish: return kBladderfishTech;
+        default: return 0;
+    }
 }
 constexpr Species species_for_tech(int tech) {
-    return tech == kPeeperTech ? Species::Peeper : Species::Boomerang;
+    for (auto species : kLiveSpecies)
+        if (tech_for_species(species) == tech) return species;
+    return Species::Unknown;
 }
-constexpr int tech_for_species(Species species) {
-    return species == Species::Peeper ? kPeeperTech : kBoomerangTech;
+constexpr bool supported_tech(int tech) {
+    return species_for_tech(tech) != Species::Unknown;
 }
 enum Kind:uint8_t { Request=1, Pose=2, End=3, Refuse=4, LivePose=5 };
 constexpr size_t kLiveFishLimit = 40;
@@ -88,7 +97,7 @@ inline bool newer(uint32_t a,uint32_t b){const uint32_t d=a-b;return d&&d<0x8000
 inline bool valid(const Message& m) {
     if(m.kind<Request||m.kind>LivePose||!m.host||!m.epoch||!m.sender||
        !m.nonce||!nonzero(m.session)||!nonzero(m.fish)||!nonzero(m.prefab))return false;
-    if (m.species != Species::Boomerang && (m.kind != LivePose || m.species != Species::Peeper))
+    if (m.kind == LivePose ? !tech_for_species(m.species) : m.species != Species::Boomerang)
         return false;
     if (m.kind == LivePose) {
         if (m.target || m.sender != m.host || m.nonce != 1 || !m.sequence || m.elapsed_ms)
@@ -177,12 +186,18 @@ inline bool permitted(const Message& m,uint32_t local,uint32_t host,const Id& se
     if (m.target != local) return false;
     return local==host ? m.kind==Request&&m.sender!=host : m.kind!=Request&&m.sender==host;
 }
-// Reception time interpolation; never extrapolates or re-enables native simulation.
+// Live fish render from a short receive history. Brief gaps can use bounded
+// position prediction. The diagnostic keeps its original interpolation policy.
 class Receiver {
-    Message run_,previous_,latest_,resume_from_;
-    bool has_=false;
+    struct TimedPose { Message pose; double at=0; };
+    static constexpr double kLiveDelay = .085;
+    static constexpr double kLivePrediction = .065;
+    static constexpr float kMaxPredictedDistance = .20f;
+    Message run_,resume_from_;
+    std::array<TimedPose,4> history_{};
+    size_t count_=0;
     bool resuming_=false;
-    double previous_at_=0,latest_at_=0,resume_started_=0;
+    double resume_started_=0;
     static bool blend(const Message& a,const Message& b,float t,Message* out) {
         Message result=b;
         for(int i=0;i<3;++i)result.position[i]=a.position[i]+t*(b.position[i]-a.position[i]);
@@ -195,29 +210,66 @@ class Receiver {
 public:
     void reset(const Message& run){*this=Receiver{};run_=run;}
     bool accept(const Message& pose,double now) {
-        const bool expected = run_.kind == LivePose ? pose.kind == LivePose
+        const bool live = run_.kind == LivePose;
+        const bool expected = live ? pose.kind == LivePose
             : pose.kind == Pose && pose.target == run_.sender;
+        const auto& latest = history_[0];
         if(!valid(pose)||!expected||!same_run(run_,pose)||pose.sender!=run_.host||
-           !std::isfinite(now)||(has_&&(now<latest_at_||!newer(pose.sequence,latest_.sequence))))return false;
-        if(has_&&now-latest_at_>.5){
+           !std::isfinite(now)||(count_&&(now<latest.at||!newer(pose.sequence,latest.pose.sequence))))return false;
+        if(count_&&now-latest.at>(live ? .25 : .5)){
             if(!sample(now,&resume_from_))return false;
             resume_started_=now;resuming_=true;
+            if(live) count_=0;
         }
-        previous_=has_?latest_:pose;previous_at_=has_?latest_at_:now;
-        latest_=pose;latest_at_=now;has_=true;return true;
+        if (count_ && now == latest.at) {
+            history_[0].pose = pose;
+        } else {
+            count_=std::min(count_+1,history_.size());
+            for(size_t i=count_-1;i>0;--i) history_[i]=history_[i-1];
+            history_[0]={pose,now};
+        }
+        return true;
     }
     bool sample(double now,Message* out) const {
-        if(!has_||!out||!std::isfinite(now))return false;
-        double span=latest_at_-previous_at_;
-        float t=span>0?float(std::clamp((now-.12-previous_at_)/span,0.0,1.0)):1;
-        if(!blend(previous_,latest_,t,out))return false;
-        if(resuming_&&now-resume_started_<.35){
-            float resume_t=float(std::clamp((now-resume_started_)/.35,0.0,1.0));
+        if(!count_||!out||!std::isfinite(now))return false;
+        const bool live = run_.kind == LivePose;
+        const double render_at = now - (live ? kLiveDelay : .12);
+        const auto& latest = history_[0];
+        *out = latest.pose;
+        if (count_ > 1) {
+            if (render_at < latest.at) {
+                size_t older = 1;
+                while (live && older + 1 < count_ && render_at < history_[older].at) ++older;
+                const auto& a = history_[older];
+                const auto& b = history_[older - 1];
+                const float t = float(std::clamp((render_at - a.at) / (b.at - a.at), 0.0, 1.0));
+                if (!blend(a.pose, b.pose, t, out)) return false;
+                out->sequence = latest.pose.sequence;
+            } else if (live) {
+                const auto& previous = history_[1];
+                const double span = latest.at - previous.at;
+                if (span >= .02 && span <= .25) {
+                    const float fraction = float(std::min(render_at - latest.at, kLivePrediction) / span);
+                    std::array<float,3> step{};
+                    float distance_squared = 0;
+                    for (size_t i=0;i<step.size();++i) {
+                        step[i]=(latest.pose.position[i]-previous.pose.position[i])*fraction;
+                        distance_squared+=step[i]*step[i];
+                    }
+                    const float scale = distance_squared > kMaxPredictedDistance*kMaxPredictedDistance
+                        ? kMaxPredictedDistance/std::sqrt(distance_squared) : 1;
+                    for (size_t i=0;i<step.size();++i) out->position[i]+=step[i]*scale;
+                }
+            }
+        }
+        const double resume_duration = live ? .18 : .35;
+        if(resuming_&&now-resume_started_<resume_duration){
+            float resume_t=float(std::clamp((now-resume_started_)/resume_duration,0.0,1.0));
             return blend(resume_from_,*out,resume_t,out);
         }
         return true;
     }
-    double age(double now)const{return has_?now-latest_at_:1e9;}
-    bool has_pose()const{return has_;}
+    double age(double now)const{return count_?now-history_[0].at:1e9;}
+    bool has_pose()const{return count_!=0;}
 };
 } // namespace creature_motion

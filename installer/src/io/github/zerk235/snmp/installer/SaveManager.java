@@ -97,18 +97,18 @@ final class SaveManager {
             .put("createdAt",System.currentTimeMillis()).put("imported",true).put("verified",true);
         save(record); return record;
     }
-    void checkRemoval(ApkPatcher.Progress progress) throws Exception {
+    String checkRemoval(ApkPatcher.Progress progress) throws Exception {
         PatchEngine engine=new PatchEngine(context); JSONObject plan=engine.plan(); PackageInfo game=engine.installed();
         String blocked=engine.removalBlocker(plan); if(blocked!=null) throw new IOException(blocked);
+        String identity = PatchEngine.removalIdentity(game);
         JSONObject record=verify();
         if(!record.getString("sourceCert").equals(PatchEngine.certificate(game)) || record.getInt("sourceUid")!=game.applicationInfo.uid)
             throw new IOException("Копия относится к другой установке игры. Создайте новую");
         try(SaveBridge bridge=new SaveBridge(context)) { bridge.call(SaveAccessService.CHECK_PROFILES,archive(record),false); }
         engine.verifyPlan(plan,progress);
         try(SaveBridge bridge=new SaveBridge(context)) { bridge.call(SaveAccessService.CHECK_REMOVAL,archive(record),false); }
-        PackageInfo after=engine.installed();
-        if(after==null || !PatchEngine.GAME_VERSION.equals(after.versionName) || after.applicationInfo.uid!=game.applicationInfo.uid
-            || !PatchEngine.certificate(after).equals(record.getString("sourceCert"))) throw new IOException("Игра изменилась во время проверки");
+        if (!identity.equals(engine.removalIdentity())) throw new IOException("Игра изменилась во время проверки");
+        return identity;
     }
     boolean needsRestore() throws Exception { return needsRestore(latest(),new PatchEngine(context).installed()); }
     boolean needsRestore(JSONObject record,PackageInfo game) throws Exception {

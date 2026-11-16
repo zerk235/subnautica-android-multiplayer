@@ -2758,7 +2758,38 @@ void session_auto_join_tick(double now) {
     pthread_mutex_unlock(&g_session.lock);
 }
 
+void detect_host_world_refresh(double now) {
+    // The event and pose paths hold the peer lock while checking session membership.
+    // Read both sides in the same order so a local event cannot deadlock the pump.
+    pthread_once(&g_peers_lock_once, init_peers_lock);
+    pthread_mutex_lock(&g_peers_lock);
+    pthread_mutex_lock(&g_session.lock);
+    const uint32_t host = g_session.host_id;
+    uint32_t generation = 0;
+    if (!g_session.explicit_leave && g_session.active && g_session.local_member &&
+        !g_session.local_host && g_session.local_has_world && g_session.join_accepted && host) {
+        const int index = peer_index_by_id(host);
+        if (index >= 0 && g_remote[index].valid && g_remote[index].protocol_v3 &&
+            now - g_remote[index].last_presence <= kPeerTimeout) {
+            generation = g_remote[index].world_gen;
+        }
+    }
+    pthread_mutex_unlock(&g_peers_lock);
+
+    // Defer the transfer until the guest next leaves the loaded world.
+    if (generation > g_session.host_world_gen_seen && !g_session.world_refresh_pending) {
+        g_session.world_refresh_pending = true;
+        session_set_state_locked(kSessionGuest, kJoinAccepted,
+                                 "host published a newer world; exit to menu to receive it");
+        LOG_WARN("world: host %08x published a newer world (gen %u > %u); exit to "
+                 "the menu and re-enter to receive it",
+                 host, generation, g_session.host_world_gen_seen);
+    }
+    pthread_mutex_unlock(&g_session.lock);
+}
+
 void process_session_tick(double now) {
+    detect_host_world_refresh(now);
     bool send_join = false;
     bool send_world_request = false;
     bool do_leave = false;
@@ -2815,43 +2846,6 @@ void process_session_tick(double now) {
     local_host = g_session.local_host;
     current_host = g_session.host_id;
     memcpy(current_session, g_session.session_id, sizeof(current_session));
-
-    // World-refresh detect. While the guest is IN a world, the host's presence
-    // carrying a higher offer generation (host_offer_refresh_tick republished after
-    // an autosave, migrated host, or any other re-offer) means a newer world exists.
-    // Guid moved from the detector to telemetry: the world identity may or may not
-    // cycle per autosave, the monotonic generation counter never degrades. Never
-    // touch the local world here - the flow only records the fact and the guest's
-    // next natural world exit pulls a fresh copy (the handoff reset below + the
-    // request loop).
-    if (!do_leave && g_session.active && local_member && !local_host &&
-        local_has_world && g_session.join_accepted && current_host) {
-        pthread_once(&g_peers_lock_once, init_peers_lock);
-        pthread_mutex_lock(&g_peers_lock);
-        int host_index = peer_index_by_id(current_host);
-        uint32_t host_world_gen = 0;
-        if (host_index >= 0 && g_remote[host_index].valid &&
-            g_remote[host_index].protocol_v3 &&
-            now - g_remote[host_index].last_presence <= kPeerTimeout) {
-            host_world_gen = g_remote[host_index].world_gen;
-        }
-        pthread_mutex_unlock(&g_peers_lock);
-        if (host_world_gen != 0) {
-            // g_session.lock has been held since the start of process_session_tick().
-            // Re-locking this non-recursive mutex deadlocks the pump on a newer host world,
-            // exactly when the guest needs to set world_refresh_pending.
-            if (host_world_gen > g_session.host_world_gen_seen &&
-                !g_session.world_refresh_pending) {
-                g_session.world_refresh_pending = true;
-                session_set_state_locked(kSessionGuest, kJoinAccepted,
-                                         "host published a newer world; exit to menu to "
-                                         "receive it");
-                LOG_WARN("world: host %08x published a newer world (gen %u > %u); exit to "
-                         "the menu and re-enter to receive it",
-                         current_host, host_world_gen, g_session.host_world_gen_seen);
-            }
-        }
-    }
 
     // A guest that left its world (slot loaded, then exited) with a finished or
     // failed handoff marks those as consumed, so the request loop below resumes

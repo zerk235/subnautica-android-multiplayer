@@ -99,44 +99,119 @@ void fish_pickup_click(void* pickup,void* hand,void* method) try {
 
 void fish_pickup_ui(void* reticle) {
     auto& s=g_fish_pickup;auto& a=g_fish_pickup_api;
-    if(!fish_pickup_live()||g_local_is_host||!probe_exists(g_local_player))return;
+    static fish_motion::Message recent_target;
+    static double recent_at = -1;
+    static uint32_t recent_generation = 0;
+    if(g_local_is_host||!probe_exists(g_local_player)) {
+        recent_at = -1;
+        return;
+    }
     void* hand=contents_field(g_local_player,a.hand_field);
-    if(!probe_exists(hand)||a.hand_mode.call(hand,a.hand_mode.method)!=0||a.hand_pda.call(hand,a.hand_pda.method))return;
+    if(!probe_exists(hand)||a.hand_mode.call(hand,a.hand_mode.method)!=0||a.hand_pda.call(hand,a.hand_pda.method)) {
+        recent_at = -1;
+        return;
+    }
+    const bool pressed = a.button_down.call(4,a.button_down.method);
+    if (!fish_pickup_live()) {
+        recent_at = -1;
+        if (pressed) LOG_INFO("fish pickup: guest input blocked before targeting context=%u failed=%u runtime=%u reid=%u world=%u",
+            unsigned(s.context), unsigned(s.failed), unsigned(g_boomerang.runtime_ready),
+            unsigned(g_reid_wanted), unsigned(contents_world_ready()));
+        return;
+    }
     void* camera=a.hand_camera.call(hand,a.hand_camera.method);if(!probe_exists(camera))return;
     void* tr=g_get_transform.call(camera,g_get_transform.method);if(!probe_exists(tr))return;
     const auto origin=g_get_position.call(tr,g_get_position.method),forward=a.forward.call(tr,a.forward.method);
-    float nearest=fp::kUseDistance;BoomerangReplica* chosen=nullptr;
+    const double now = build_now();
+    float nearest=fp::kUseDistance;
+    Vector3 target{};
+    BoomerangReplica* chosen=nullptr;
+    BoomerangReplica* recent=nullptr;
     for(auto& r:g_boomerang.replicas) {
-        if(!r.handle||r.hidden||!r.written||r.receiver.age(build_now())>.5||fish_pickup_suppressed(r.identity))continue;
+        if(!r.handle||r.hidden||!r.written||r.receiver.age(now)>.5||fish_pickup_suppressed(r.identity))continue;
         const auto pos=r.last_written;
         float dx=pos.x-origin.x,dy=pos.y-origin.y,dz=pos.z-origin.z;
         const float along=dx*forward.x+dy*forward.y+dz*forward.z;
-        if(along<=0||along>=nearest||dx*dx+dy*dy+dz*dz-along*along>.40f*.40f)continue;
-        nearest=along;chosen=&r;
+        const float distance_sq=dx*dx+dy*dy+dz*dz;
+        const float perpendicular_sq=distance_sq-along*along;
+        if (recent_at >= 0 && recent_generation == g_world_context_generation &&
+            fish_motion::same_run(r.identity, recent_target) &&
+            fp::keep_reticle_target(now,recent_at,along,distance_sq,perpendicular_sq)) recent=&r;
+        if(along < -1.4f || along > fp::kUseDistance+1.4f || perpendicular_sq > 1.4f*1.4f) continue;
+        bool hit_body = false;
+        if (g_held_renderer_bounds) {
+            for (const auto& saved : r.renderers) {
+                if (!saved.enabled || !probe_exists(saved.component)) continue;
+                const auto bounds = g_held_renderer_bounds.call(saved.component,g_held_renderer_bounds.method);
+                if (!(boomerang_distance_sq(bounds.center,pos) <= .75f*.75f)) continue;
+                const float hit = fp::aim_box_distance(
+                    {bounds.center.x-origin.x,bounds.center.y-origin.y,bounds.center.z-origin.z},
+                    {forward.x,forward.y,forward.z}, {bounds.extents.x,bounds.extents.y,bounds.extents.z});
+                if (!hit) continue;
+                hit_body = true;
+                if (hit >= nearest) continue;
+                nearest=hit;chosen=&r;
+                target={origin.x+forward.x*hit,origin.y+forward.y*hit,origin.z+forward.z*hit};
+            }
+        }
+        if (hit_body || along<=0 || along>=nearest || perpendicular_sq>.40f*.40f ||
+            distance_sq>fp::kUseDistance*fp::kUseDistance) continue;
+        nearest=along;chosen=&r;target=pos;
     }
-    if(!chosen)return;
+    // The touch may arrive a frame after the last reticle update. Prefer that
+    // displayed fish for the tap and revalidate the same fish below.
+    const bool held_target = recent && (!chosen || (pressed && recent != chosen));
+    if (held_target) {
+        chosen=recent;
+        target=recent->last_written;
+    }
+    if(!chosen) {
+        if (pressed) LOG_INFO("fish pickup: guest input had no fish under reticle");
+        return;
+    }
     void* go=chosen->visual?chosen->visual:g_get_game_object.call(chosen->fish,g_get_game_object.method);
     if(!probe_exists(go))return;
     void* other=a.hand_target.call(hand,a.hand_target.method);
     // Do not perform two interactions from the same tap when the native hand
     // already has a different object (e.g. a locker behind a visual fish).
-    if(probe_exists(other)&&!fish_pickup_child_of(other,go))return;
-    const auto pos=chosen->last_written;
-    const float dx=pos.x-origin.x,dy=pos.y-origin.y,dz=pos.z-origin.z;
-    const float distance=sqrtf(dx*dx+dy*dy+dz*dz);if(distance<.001f||distance>fp::kUseDistance)return;
+    if(probe_exists(other)&&!fish_pickup_child_of(other,go)) {
+        recent_at = -1;
+        if (pressed) LOG_INFO("fish pickup: guest input used by another native target");
+        return;
+    }
+    const float dx=target.x-origin.x,dy=target.y-origin.y,dz=target.z-origin.z;
+    const float distance=sqrtf(dx*dx+dy*dy+dz*dz);if(distance<.0005f||distance>fp::kUseDistance)return;
     const Vector3 ray{dx/distance,dy/distance,dz/distance};FishRayHit hit{};
     if(g_fish_raycast.call(origin,ray,&hit,distance,-5,1,g_fish_raycast.method)) {
         void* collider=g_fish_hit_collider.call(&hit,g_fish_hit_collider.method);
         void* hit_go=probe_exists(collider)?g_get_game_object.call(collider,g_get_game_object.method):nullptr;
-        if(!probe_exists(hit_go)||!fish_pickup_child_of(hit_go,go))return;
+        if(!probe_exists(hit_go)||!fish_pickup_child_of(hit_go,go)) {
+            recent_at = -1;
+            if (pressed) LOG_INFO("fish pickup: guest input blocked by an obstacle");
+            return;
+        }
     }
     void* container=contents_inventory();
     const int tech=fish_motion::tech_for_species(chosen->identity.species);
     bool room=container&&g_contents_api.room_tech.call(container,tech,g_contents_api.room_tech.method);
     a.reticle_pickup.call(reticle,tech,room&&!s.pending.used,4,a.reticle_pickup.method);
     a.reticle_distance.call(reticle,distance,a.reticle_distance.method);
-    static double next_hint=0;if(build_now()>=next_hint){next_hint=build_now()+5;LOG_INFO("fish pickup: reticle target=%s distance=%.2f room=%u pending=%u",fp::hex(chosen->identity.fish).c_str(),distance,unsigned(room),unsigned(s.pending.used));}
-    if(room&&!s.pending.used&&a.button_down.call(4,a.button_down.method))fish_pickup_request(chosen->identity);
+    if (!held_target && room && !s.pending.used) {
+        recent_target = chosen->identity;
+        recent_at = now;
+        recent_generation = g_world_context_generation;
+    }
+    static double next_hint=0;
+    if(pressed||now>=next_hint) {
+        next_hint=now+5;
+        LOG_INFO("fish pickup: reticle target=%s tech=%d distance=%.2f room=%u pending=%u pressed=%u grace=%u",
+            fp::hex(chosen->identity.fish).c_str(),tech,distance,unsigned(room),unsigned(s.pending.used),
+            unsigned(pressed),unsigned(held_target));
+    }
+    if(room&&!s.pending.used&&pressed) {
+        recent_at = -1;
+        fish_pickup_request(chosen->identity);
+    }
 }
 void fish_pickup_reticle(void* self,void* method) {
     try{fish_pickup_ui(self);}catch(...){g_fish_pickup.failed=true;LOG_ERROR("fish pickup: reticle failed; pickup disabled");}

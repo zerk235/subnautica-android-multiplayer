@@ -50,6 +50,7 @@ public final class InstallerTests extends Instrumentation {
             try(ZipFile zip=new ZipFile(again)) { check(Arrays.equals(original,ApkPatcher.readSmall(zip.getInputStream(zip.getEntry(ApkPatcher.ORIGINAL)),4096)),"nested bootstrap"); }
             boolean refused=false; try { ApkPatcher.rewrite(input,output,mod,progress); } catch(IOException expected) { refused=true; } check(refused,"overwrite");
             refused=false; try { ApkPatcher.requireElf(new byte[64]); } catch(IOException expected) { refused=true; } check(refused,"ELF guard");
+            testEmbeddedAssets(dir, original, mod, progress);
             LocalSigner signer=new LocalSigner(); String cert=signer.fingerprint(); check(cert.equals(new LocalSigner().fingerprint()),"key persistence");
             // Sign a genuine tiny Android APK (this installer) to exercise apksig on ART.
             File own=new File(context.getApplicationInfo().sourceDir), unsigned=new File(dir,"own-unsigned.apk"), signed=new File(dir,"own-signed.apk");
@@ -69,7 +70,7 @@ public final class InstallerTests extends Instrumentation {
                 PatchService.status(context,"Проверка на телефоне прошла. Подготовленные APK подписаны и проверены. Игра и сохранения не менялись.");
             }
             new PatchEngine(context).removeOwnTree(dir);
-            result.putString("result","PASS: streaming patch, original preservation/repatch, overwrite/ELF guards, manifest parsing, persistent Android Keystore, on-device APK signing/verification"
+            result.putString("result","PASS: streaming patch, original preservation/repatch, embedded resource checks, overwrite/ELF guards, manifest parsing, persistent Android Keystore, on-device APK signing/verification"
                 + ("prepare-game".equals(mode)?", real game full preparation and signature conflict guard":"")
                 + ("sessions".equals(mode)?", fresh and update Android split sessions, split SHA256 and private app-data preservation":""));
             PatchService.status(context,"Автоматические проверки установщика прошли. Игра и её сохранения не менялись.");
@@ -81,6 +82,37 @@ public final class InstallerTests extends Instrumentation {
             PatchService.BUSY.set(false);
             result.putString("failure",android.util.Log.getStackTraceString(e)); finish(0,result);
         }
+    }
+
+    static void testEmbeddedAssets(File dir, byte[] original, byte[] mod, ApkPatcher.Progress progress) throws Exception {
+        File baseOnly = new File(dir, "embedded.apk"), patched = new File(dir, "embedded-patched.apk");
+        File incomplete = new File(dir, "embedded-incomplete.apk");
+        String[] markers = {"assets/SNUnmanagedData/Build18/biomeMap.bin", "assets/SNUnmanagedData/Build18/index.txt",
+                            "assets/SNUnmanagedData/Build18/meta.txt", "assets/bin/Data/globalgamemanagers"};
+        for (File file : Arrays.asList(baseOnly, incomplete)) {
+            try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(file))) {
+                zip.putNextEntry(new ZipEntry(ApkPatcher.MAIN)); zip.write(original); zip.closeEntry();
+                for (String marker : markers) {
+                    zip.putNextEntry(new ZipEntry(marker));
+                    if (file.equals(baseOnly) || !marker.endsWith("index.txt")) zip.write(marker.getBytes(StandardCharsets.UTF_8));
+                    zip.closeEntry();
+                }
+            }
+        }
+        PatchEngine.requirePreparedAssets(Collections.emptySet(), baseOnly);
+        ApkPatcher.rewrite(baseOnly, patched, mod, progress);
+        PatchEngine.requirePreparedAssets(Collections.emptySet(), patched);
+        try (ZipFile zip = new ZipFile(patched)) {
+            for (String marker : markers) {
+                byte[] contents = ApkPatcher.readSmall(zip.getInputStream(zip.getEntry(marker)), 4096);
+                check(Arrays.equals(contents, marker.getBytes(StandardCharsets.UTF_8)), "embedded resource changed: " + marker);
+            }
+        }
+        PatchEngine.requirePreparedAssets(Collections.singleton("base_assets"), incomplete);
+        boolean refused = false;
+        try { PatchEngine.requirePreparedAssets(Collections.singleton("config.arm64_v8a"), incomplete); }
+        catch (IOException expected) { refused = PatchEngine.PREPARED_ASSETS_MISSING.equals(expected.getMessage()); }
+        check(refused, "partial embedded assets must not pass validation");
     }
 
     void testSessions(Context context,File dir,LocalSigner signer,ApkPatcher.Progress progress) throws Exception {

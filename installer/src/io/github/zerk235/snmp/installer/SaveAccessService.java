@@ -61,6 +61,7 @@ public final class SaveAccessService extends Binder {
                 try(ParcelFileDescriptor fd=ParcelFileDescriptor.CREATOR.createFromParcel(data)) {
                     JSONObject expected=SaveArchive.inspect(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),null);
                     if(!SaveArchive.same(current,expected)) throw new IOException("Миры изменились после копирования. Создайте новую копию");
+                    if (code == CHECK_REMOVAL) profiles().requireOnly(owner / 100000);
                     result=new JSONObject().put("verified",true).put("files",current.getJSONObject("files").length());
                 }
             } else if(code==CHECK_PROFILES) {

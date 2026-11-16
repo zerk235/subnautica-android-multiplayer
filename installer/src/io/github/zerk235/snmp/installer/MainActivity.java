@@ -30,7 +30,7 @@ public final class MainActivity extends Activity {
     TextView note, installHint;
     Button install, cancel;
     // Worlds screen views.
-    TextView savesNote;
+    TextView savesNote, removalHint;
     Button backup, restore, export, importCopy, remove;
     // Settings screen views.
     TextView diagnosticsNote;
@@ -57,6 +57,7 @@ public final class MainActivity extends Activity {
 
     public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (state != null) removalToken = state.getString("removalToken");
         getWindow().setStatusBarColor(Ui.BG);
         getWindow().setNavigationBarColor(Ui.BG);
 
@@ -409,6 +410,8 @@ public final class MainActivity extends Activity {
         remove = Ui.button(this, "   Удалить старую игру\nТолько после резервной копии", 2);
         remove.setOnClickListener(v -> confirmReplace());
         danger.addView(remove);
+        removalHint = Ui.text(this, "", 13, Ui.MUTED);
+        danger.addView(removalHint);
         body.addView(danger);
     }
 
@@ -625,6 +628,10 @@ public final class MainActivity extends Activity {
     public void onResume() { super.onResume(); handler.post(refresh); }
     public void onPause() { handler.removeCallbacks(refresh); super.onPause(); }
     public void onDestroy() { Shizuku.removeRequestPermissionResultListener(permissionResult); super.onDestroy(); }
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putString("removalToken", removalToken);
+    }
 
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
@@ -702,7 +709,9 @@ public final class MainActivity extends Activity {
             SaveManager worlds = new SaveManager(this); JSONObject saved = worlds.latest();
             if (info == null && saved != null && !getSharedPreferences("status", 0).getBoolean("restoreRequired", false))
                 getSharedPreferences("status", 0).edit().putBoolean("restoreRequired", true).apply();
-            String access = SaveBridge.readiness(); boolean needsRestore = worlds.needsRestore();
+            String shizuku = SaveBridge.readiness();
+            String access = shizuku;
+            boolean needsRestore = worlds.needsRestore();
             if (access == null) {
                 if (!busy) refreshProfiles();
                 if (profileError != null) access = "Не удалось подтвердить доступ Shizuku: " + profileError;
@@ -725,19 +734,25 @@ public final class MainActivity extends Activity {
             setEnabledStep(4, !busy && info != null && !needsRestore);
             install.setEnabled(!busy && plan != null && engine.installBlocker(plan) == null && pending < 0);
             String blocker = engine.installBlocker(plan);
-            boolean replacement = plan != null && engine.removalBlocker(plan) == null;
-            boolean onlyCurrent = profileState != null && profileState.optBoolean("currentInstalled")
-                && profileState.getJSONArray("installedUsers").length() == 1 && profileError == null
-                && SystemClock.elapsedRealtime() - profileCheckedAt < 15000;
-            remove.setEnabled(!busy && pending < 0 && replacement && onlyCurrent && saved != null && access == null);
+            String replacementBlocker = planError != null ? planError : engine.removalBlocker(plan);
+            boolean replacement = replacementBlocker == null;
+            String removalBlocker = replacementBlocker;
+            if (busy) removalBlocker = "Дождитесь завершения текущей операции.";
+            else if (pending >= 0) removalBlocker = "Подтвердите или отмените текущую установку Android.";
+            else if (replacement && shizuku != null) removalBlocker = shizuku;
+            else if (replacement && saved == null) removalBlocker = "Создайте проверенную копию миров в патчере.";
+            // Clicking starts the preflight. It checks the current Android profiles
+            // through Shizuku before granting permission to open the uninstall dialog.
+            remove.setEnabled(removalBlocker == null);
+            updateText(removalHint, removalBlocker == null
+                ? "Проверим APK, профили Android и копию миров перед системным подтверждением."
+                : removalBlocker);
             cancel.setVisibility(pending < 0 ? View.GONE : View.VISIBLE);
             cancel.setEnabled(!busy);
             String noteValue = plan == null ? (planError == null ? "После подготовки здесь станет доступна установка." : planError) : (blocker == null
                 ? "Файлы проверены. Android запросит разрешение и подтверждение установки."
                 : blocker);
-            if (replacement && access == null && !onlyCurrent) noteValue = profileError != null ? profileError
-                : profileState == null ? "Проверка профилей Android перед заменой подписи…"
-                : "Игра установлена также в другом профиле Android или клоне. Удаление заблокировано: новая подпись не заменит этот пакет. Клон и его миры сохраняются.";
+            if (replacement && removalBlocker != null) noteValue = removalBlocker;
             setEnabledStep(3, remove.isEnabled() || install.isEnabled());
             launchHost.setEnabled(launchReady(info, needsRestore, busy));
             launchGuest.setEnabled(launchReady(info, needsRestore, busy));
@@ -753,10 +768,16 @@ public final class MainActivity extends Activity {
                 long age = SystemClock.elapsedRealtime() - getSharedPreferences("status", 0).getLong("removalReadyAt", 0);
                 String identity = getSharedPreferences("status", 0).getString("removalIdentity", "");
                 getSharedPreferences("status", 0).edit().remove("removalToken").apply();
-                if (!busy && replacement && onlyCurrent && age >= 0 && age < 10000 && identity.equals(engine.removalIdentity())) {
-                    Diagnostics.event(this, "request_game_removal", "verified current-profile identity and fresh one-use grant");
-                    startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + PatchEngine.GAME)));
-                } else PatchService.status(this, "Проверка удаления устарела или установка изменилась. Игра не удалена; повторите проверку.");
+                // The grant already includes a fresh Shizuku profile check. The periodic
+                // UI snapshot may have expired during APK hashing and signature verification.
+                if (replacement && pending < 0 && SaveBridge.readiness() == null && age >= 0 && age < 10000) {
+                    try {
+                        if (!identity.equals(engine.removalIdentity()))
+                            throw new IOException("Игра изменилась во время проверки");
+                        startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + PatchEngine.GAME)));
+                        Diagnostics.event(this, "request_game_removal", "verified current-profile identity and fresh one-use grant");
+                    } catch (Exception error) { showError("check-removal", error); }
+                } else PatchService.status(this, "Проверка удаления устарела или условия изменились. Игра не удалена. Повторите проверку.");
             }
             updateText(status, getSharedPreferences("status", 0).getString("message", "Не подключено"));
             quickBackup.setEnabled(backup.isEnabled());
@@ -769,6 +790,7 @@ public final class MainActivity extends Activity {
             launchHost.setEnabled(false); launchGuest.setEnabled(false);
             recoverGame.setEnabled(false);
             updateText(note, e.getMessage());
+            updateText(removalHint, e.getMessage());
             updateText(status, getSharedPreferences("status", 0).getString("message", "Нужна повторная подготовка."));
         }
     }
@@ -778,7 +800,9 @@ public final class MainActivity extends Activity {
         if (!android.text.TextUtils.equals(view.getText(), value)) view.setText(value);
     }
 
-    boolean launchReady(PackageInfo info, boolean needsRestore, boolean busy) { return !busy && PatchEngine.hasAssets(info) && !needsRestore; }
+    boolean launchReady(PackageInfo info, boolean needsRestore, boolean busy) throws IOException {
+        return !busy && !needsRestore && PatchEngine.hasAssets(info);
+    }
 
     void setEnabledStep(int index, boolean enabled) {
         stepRows[index].setEnabled(enabled);

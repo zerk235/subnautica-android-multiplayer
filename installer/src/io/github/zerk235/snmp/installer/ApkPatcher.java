@@ -10,7 +10,22 @@ import java.util.zip.*;
 final class ApkPatcher {
     static final String MAIN = "lib/arm64-v8a/libmain.so";
     static final String ORIGINAL = "lib/arm64-v8a/libmain_orig.so";
+    private static final String WORLD_DATA = "assets/SNUnmanagedData/Build18/";
+    private static final String[] EMBEDDED_ASSETS = {
+        WORLD_DATA + "biomeMap.bin", WORLD_DATA + "index.txt", WORLD_DATA + "meta.txt",
+        "assets/bin/Data/globalgamemanagers"
+    };
     interface Progress { void update(String stage, long done, long total) throws IOException; }
+
+    static boolean hasEmbeddedAssets(File base) throws IOException {
+        try (ZipFile zip = new ZipFile(base)) {
+            for (String name : EMBEDDED_ASSETS) {
+                ZipEntry entry = zip.getEntry(name);
+                if (entry == null || entry.isDirectory() || entry.getSize() <= 0) return false;
+            }
+            return true;
+        }
+    }
 
     static void requireElf(byte[] bytes) throws IOException {
         if (bytes.length < 64 || bytes[0] != 127 || bytes[1] != 'E' || bytes[2] != 'L'

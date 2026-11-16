@@ -8,6 +8,32 @@ using Id=creature_motion::Id;
 constexpr int kBoomerang=creature_motion::kBoomerangTech;
 constexpr float kUseDistance=3.6f,kAuthorityDistance=5.5f;
 constexpr size_t kMaxRecords=512;
+inline bool keep_reticle_target(double now, double seen_at, float along, float distance_sq, float side_sq) {
+    constexpr double kTouchGraceSeconds = .20;
+    constexpr float kSideTolerance = .65f;
+    return now >= seen_at && now - seen_at <= kTouchGraceSeconds && along > 0 &&
+        distance_sq <= kUseDistance*kUseDistance && side_sq <= kSideTolerance*kSideTolerance;
+}
+inline float aim_box_distance(const std::array<float,3>& offset, const std::array<float,3>& forward,
+                              const std::array<float,3>& extents) {
+    float enter = .001f;
+    float leave = kUseDistance;
+    for (size_t axis=0; axis<offset.size(); ++axis) {
+        if (!std::isfinite(offset[axis]) || !std::isfinite(forward[axis]) ||
+            !std::isfinite(extents[axis]) || extents[axis] < 0) return 0;
+        const float half = std::clamp(extents[axis] + .06f, .12f, .55f);
+        if (std::fabs(forward[axis]) < 1e-5f) {
+            if (std::fabs(offset[axis]) > half) return 0;
+            continue;
+        }
+        const float a = (offset[axis] - half) / forward[axis];
+        const float b = (offset[axis] + half) / forward[axis];
+        enter = std::max(enter, std::min(a,b));
+        leave = std::min(leave, std::max(a,b));
+        if (enter > leave) return 0;
+    }
+    return enter;
+}
 struct Identity {Id session{},fish{},prefab{};uint32_t epoch=0;};
 inline std::string hex(const Id& id) {
     static const char digits[]="0123456789abcdef";std::string s;

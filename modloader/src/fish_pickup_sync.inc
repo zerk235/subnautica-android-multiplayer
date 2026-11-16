@@ -170,7 +170,7 @@ bool fish_pickup_begin_load(const lc::Message& m) {
     fp::Identity id;if(!fp::identity(m.locker,&id)||!s.pending.may_restore(m))return false;
     void* container=contents_inventory();
     if(!container||!a.room_tech.call(container,m.item.tech,a.room_tech.method)) {
-        fish_pickup_notice("SNMP: в инвентаре нет места для бумеранга.");fish_pickup_cancel();return false;
+        fish_pickup_notice("SNMP: в инвентаре нет места для рыбы.");fish_pickup_cancel();return false;
     }
     ContentsNativeItem owned;
     if(fish_pickup_inventory_item(m,&owned)){
@@ -230,7 +230,7 @@ void fish_pickup_poll_load() {
     }
     void* container=contents_inventory();if(!container)return;
     if(!a.room.call(container,pickup,a.room.method)) {
-        if(build_now()>=load.next_notice){load.next_notice=build_now()+5;fish_pickup_notice("SNMP: освободи место в инвентаре — бумеранг зарезервирован.");}return;
+        if(build_now()>=load.next_notice){load.next_notice=build_now()+5;fish_pickup_notice("SNMP: освободи место в инвентаре. Рыба зарезервирована.");}return;
     }
     if(!s.pending.applied) {
         s.pending.loading=false;s.pending.applied=true;

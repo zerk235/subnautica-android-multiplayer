@@ -6,6 +6,7 @@
 #include <cassert>
 #include <vector>
 #include <algorithm>
+#include <thread>
 
 void mod_logf(const char*, const char*, ...) {}
 void net_note_session_role(bool, uint32_t) {}
@@ -290,6 +291,25 @@ int main() {
     service_world_events(now+.010+kEventResendInterval+.012);
     packets=read_packets(b);assert(packets.size()==1);
     activate(b,a);feed(packets,a);assert((delivered()==std::vector<uint32_t>{9}));
+    // A loaded guest can post pickups while the pump checks for a newer host save.
+    ++g_session.epoch;
+    activate(b, a);
+    const double refresh_time = monotonic_seconds();
+    g_session.active = g_session.join_accepted = true;
+    g_session.last_host_presence = refresh_time;
+    g_session.host_world_gen_seen = 1;
+    g_remote[0].world_gen = 2;
+    alarm(10);
+    std::thread pump([refresh_time] {
+        for (int i = 0; i < 2000; ++i) process_session_tick(refresh_time);
+    });
+    for (int i = 0; i < 2000; ++i) post(kWorldEventPickup);
+    pump.join();
+    alarm(0);
+    assert(g_session.world_refresh_pending && g_session.state == kSessionGuest);
+    assert(g_events.next_sequence == 2000);
+    puts("PASS: concurrent guest pickup events and host world refresh");
+
     close(a.socket); close(b.socket); close(c.socket);
     puts("PASS: real UDP ordered first packet, lost ACK, 31s outage, offline actions, endpoint/slot reuse, new recipient baseline, forged ACK gates, bounded history gap and session reset");
 }

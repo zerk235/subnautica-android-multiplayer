@@ -15,8 +15,11 @@ final class PatchEngine {
     static final String GAME = "com.unknownworlds.subnautica";
     static final String GAME_VERSION = "1.22.83315";
     static final String ASSETS_SPLIT = "base_assets";
+    static final String ASSETS_MISSING = "В игре отсутствует пакет ресурсов. Нажмите «Восстановить пакет ресурсов»";
+    static final String PREPARED_ASSETS_MISSING = "В подготовленном пакете нет ресурсов Subnautica";
     static final int PLAN_SCHEMA = 2;
     static final long MIB = 1024L * 1024;
+    private static volatile InstalledAssets installedAssets;
     final Context context;
     final File prepared, staging;
     PatchEngine(Context context) {
@@ -54,8 +57,39 @@ final class PatchEngine {
         return ApkPatcher.hex(MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray()));
     }
 
-    static boolean hasAssets(PackageInfo game) {
-        return game != null && game.splitNames != null && Arrays.asList(game.splitNames).contains(ASSETS_SPLIT);
+    private static boolean hasAssetSplit(PackageInfo game) {
+        return game.splitNames != null && Arrays.asList(game.splitNames).contains(ASSETS_SPLIT);
+    }
+
+    private static final class InstalledAssets {
+        final String path;
+        final long updatedAt;
+        final boolean embedded;
+        InstalledAssets(String path, long updatedAt, boolean embedded) {
+            this.path = path;
+            this.updatedAt = updatedAt;
+            this.embedded = embedded;
+        }
+    }
+
+    static boolean hasAssets(PackageInfo game) throws IOException {
+        if (game == null || game.applicationInfo == null) return false;
+        if (hasAssetSplit(game)) return true;
+        if (!GAME_VERSION.equals(game.versionName)) return false;
+        // The UI polls installed packages. Reopen the APK only after package replacement.
+        String path = game.applicationInfo.sourceDir;
+        if (path == null) return false;
+        InstalledAssets cached = installedAssets;
+        if (cached != null && cached.path.equals(path) && cached.updatedAt == game.lastUpdateTime)
+            return cached.embedded;
+        boolean embedded = ApkPatcher.hasEmbeddedAssets(new File(path));
+        installedAssets = new InstalledAssets(path, game.lastUpdateTime, embedded);
+        return embedded;
+    }
+
+    static void requirePreparedAssets(Set<String> splits, File base) throws IOException {
+        if (!splits.contains(ASSETS_SPLIT) && !ApkPatcher.hasEmbeddedAssets(base))
+            throw new IOException(PREPARED_ASSETS_MISSING);
     }
 
     void requireAssetsRecovery(PackageInfo game, LocalSigner signer) throws Exception {
@@ -102,7 +136,9 @@ final class PatchEngine {
         if (game == null) throw new IOException("Сначала установите собственную копию Subnautica " + GAME_VERSION);
         if (!GAME_VERSION.equals(game.versionName))
             throw new IOException("Поддерживается игра " + GAME_VERSION + "; установлена " + game.versionName);
-        if (!hasAssets(game)) throw new IOException("В игре отсутствует пакет ресурсов. Нажмите «Восстановить пакет ресурсов»");
+        File base = new File(game.applicationInfo.sourceDir);
+        if (!base.isFile() || !base.canRead()) throw new IOException("Android не разрешил чтение установленного APK");
+        if (!hasAssetSplit(game) && !ApkPatcher.hasEmbeddedAssets(base)) throw new IOException(ASSETS_MISSING);
         String sourceCert = certificate(game);
         LocalSigner signer = new LocalSigner();
         boolean full = !sourceCert.equals(signer.fingerprint());
@@ -115,7 +151,7 @@ final class PatchEngine {
         String modSha = ApkPatcher.hex(MessageDigest.getInstance("SHA-256").digest(mod));
         if (!modSha.equals(modInfo.getString("sha256"))) throw new IOException("Повреждена библиотека мода в установщике");
         ApkPatcher.requireElf(mod);
-        List<File> sources = new ArrayList<>(); sources.add(new File(game.applicationInfo.sourceDir));
+        List<File> sources = new ArrayList<>(); sources.add(base);
         if (game.applicationInfo.splitSourceDirs != null)
             for (String path : game.applicationInfo.splitSourceDirs) sources.add(new File(path));
         if (sources.size() > 32) throw new IOException("Слишком много APK-пакетов игры");
@@ -154,7 +190,7 @@ final class PatchEngine {
                     throw new IOException("Некорректный набор split APK");
                 apks.put(new JSONObject().put("name", name).put("size", signed.length()).put("sha256", ApkPatcher.sha256(signed)));
             }
-            if (!splitNames.contains(ASSETS_SPLIT)) throw new IOException("В подготовленном пакете нет ресурсов Subnautica");
+            requirePreparedAssets(splitNames, new File(staging, "base.apk"));
             PackageInfo current = installed();
             if (current == null || current.getLongVersionCode() != game.getLongVersionCode()
                     || !certificate(current).equals(sourceCert) || !Objects.equals(current.applicationInfo.sourceDir, game.applicationInfo.sourceDir))
@@ -208,7 +244,7 @@ final class PatchEngine {
                 return "Subnautica отсутствует в текущем профиле, но её пакет остался в другом профиле Android или клоне с другой подписью. Установка новой подписи заблокирована. Не удаляйте другие профили и их миры: сначала верните существующую игру в текущий профиль и восстановите копию миров.";
             return plan.getBoolean("full") ? null : "Нужна установленная игра: этот пакет содержит только обновление";
         }
-        if (!hasAssets(current)) return "В игре отсутствует пакет ресурсов. Нажмите «Восстановить пакет ресурсов»";
+        if (!hasAssets(current)) return ASSETS_MISSING;
         if (!certificate(current).equals(plan.getString("cert")))
             return "Подпись установленной игры отличается. Для замены подключите Shizuku, создайте копию миров и нажмите «Удалить старую игру». Перед системным запросом установщик проверит актуальность копии и APK. Затем установите мод и восстановите миры. Не удаляйте игру вручную без проверенной копии.";
         if (current.getLongVersionCode() != plan.getLong("versionCode") || !GAME_VERSION.equals(current.versionName))
@@ -218,15 +254,22 @@ final class PatchEngine {
 
     String removalBlocker(JSONObject plan) throws Exception {
         PackageInfo game=installed();
-        if(game==null || plan==null || !plan.getBoolean("full") || !GAME_VERSION.equals(game.versionName)
-            || game.getLongVersionCode()!=plan.getLong("versionCode") || certificate(game).equals(plan.getString("cert")))
-            return "Удаление для этой установки не требуется. Подготовьте мод заново при изменении игры.";
+        if (game == null) return "Subnautica отсутствует в текущем профиле Android.";
+        if (plan == null) return "Сначала нажмите «Подготовить игру» на вкладке «Установка».";
+        if (!GAME_VERSION.equals(game.versionName) || game.getLongVersionCode() != plan.getLong("versionCode"))
+            return "Версия игры изменилась. Подготовьте мод заново.";
+        if (certificate(game).equals(plan.getString("cert")))
+            return "Подпись игры совпадает. Нажмите «Установить подготовленный мод» на вкладке «Установка».";
+        if (!plan.getBoolean("full")) return "Подготовьте игру заново для замены подписи.";
         if(new SaveManager(context).needsRestore()) return "Сначала восстановите предыдущую копию миров";
         return null;
     }
 
     String removalIdentity() throws Exception {
-        PackageInfo info=installed();
+        return removalIdentity(installed());
+    }
+
+    static String removalIdentity(PackageInfo info) throws Exception {
         if(info==null) throw new IOException("Игра не найдена в текущем профиле");
         return info.applicationInfo.uid+":"+info.getLongVersionCode()+":"+certificate(info)+":"+info.applicationInfo.sourceDir;
     }
@@ -237,7 +280,8 @@ final class PatchEngine {
             throw new IOException("Игра не найдена в текущем профиле после установки. Проверьте восстановление игры из другого профиля Android");
         if(info.getLongVersionCode()!=plan.getLong("versionCode") || !certificate(info).equals(plan.getString("cert")))
             throw new IOException("Подпись или версия игры после установки не совпала с подготовленным пакетом");
-        verifyAssetsInstalled(info);
+        if (!hasAssetSplit(info) && !ApkPatcher.hasEmbeddedAssets(new File(info.applicationInfo.sourceDir)))
+            throw new IOException("В установленной игре нет ресурсов Subnautica");
         try(java.util.zip.ZipFile apk=new java.util.zip.ZipFile(info.applicationInfo.sourceDir)) {
             java.util.zip.ZipEntry entry=apk.getEntry(ApkPatcher.MAIN);
             if(entry==null) throw new IOException("Установленный APK не содержит библиотеку мода");
@@ -248,14 +292,14 @@ final class PatchEngine {
     }
 
     void verifyAssetsInstalled(PackageInfo info) throws IOException {
-        if (!hasAssets(info)) throw new IOException("Android не установил пакет ресурсов split_base_assets.apk");
+        if (info == null || !hasAssetSplit(info)) throw new IOException("Android не установил пакет ресурсов split_base_assets.apk");
     }
 
     List<File> verifyPlan(JSONObject plan, ApkPatcher.Progress progress) throws Exception {
         LocalSigner signer = new LocalSigner();
         if (!signer.fingerprint().equals(plan.getString("cert"))) throw new IOException("Ключ подписи изменился. Подготовьте мод заново");
         JSONArray entries = plan.getJSONArray("apks");
-        if (entries.length() < 2 || entries.length() > 32)
+        if (entries.length() < 1 || entries.length() > 32)
             throw new IOException("Некорректный список APK");
         List<File> files = new ArrayList<>(); Set<String> names = new HashSet<>(), splits = new HashSet<>();
         for (int i = 0; i < entries.length(); i++) {
@@ -272,7 +316,7 @@ final class PatchEngine {
                 throw new IOException("Некорректный набор split APK");
             files.add(file);
         }
-        if (!splits.contains(ASSETS_SPLIT)) throw new IOException("В подготовленном пакете нет ресурсов Subnautica");
+        requirePreparedAssets(splits, files.get(0));
         return files;
     }
 

@@ -4,21 +4,21 @@ Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://gi
 
 [Русский README](README.md)
 
-> **Public demo 0.3.12.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A HUD marker shows your partner and their distance. Install directly on Android without a PC or root. Use a separate world and backups for your first tests. See the [tested features and limitations](docs/COMPATIBILITY.md).
+> **Public demo 0.3.13.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A HUD marker shows your partner and their distance. Install directly on Android without a PC or root. Use a separate world and backups for your first tests. See the [tested features and limitations](docs/COMPATIBILITY.md).
 
 This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
 
 ## Download and install
 
-**[Download installer 0.3.12 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.12-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.12-installer-preview)
+**[Download installer 0.3.13 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-preview)
 
-**0.3.12 adds in-game connection diagnostics.** Wild Boomerang and Peeper movement and pickup are experimental.
-[Release notes and limitations (Russian)](docs/releases/0.3.12-installer-preview.md).
+**0.3.13 adds experimental Bladderfish sync and improves guest fish pickup.** The installer supports game resources stored inside base.apk.
+[Release notes and limitations (Russian)](docs/releases/0.3.13-installer-preview.md).
 
 Update the installer over the existing app and keep its data and signing key.
 Save and exit to the game menu, then **Prepare mod → Install prepared mod on both
 phones**. Updating only the installer does not update the game mod. Protocol is
-**36**; matching builds are required. Automatic recovery of an unfinished transfer
+**37**; matching builds are required. Automatic recovery of an unfinished transfer
 after a process crash is not implemented. Use a separate test world and ordinary
 resources first. [Locker contents](docs/LOCKER_CONTENTS.md) · [Diagnostics](docs/DIAGNOSTICS.md).
 

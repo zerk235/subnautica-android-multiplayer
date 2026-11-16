@@ -69,6 +69,39 @@ int main(){
     bad = live; bad.sequence++; bad.fish[0]++; assert(!runtime.accept(bad, 2));
     bad = live; bad.sequence++; bad.kind = Pose; bad.target = 2; assert(!runtime.accept(bad, 2));
     assert(runtime.sample(10, &sample) && sample.sequence == live.sequence);
+
+    Receiver playback;
+    playback.reset(live);
+    auto moving = live;
+    for (int i = 0; i < 4; ++i) {
+        moving.sequence++;
+        moving.position[0] = i * .05f;
+        assert(playback.accept(moving, i * .05));
+    }
+    assert(playback.sample(.15, &sample));
+    assert(std::fabs(sample.position[0] - .065f) < .001f && sample.sequence == moving.sequence);
+    assert(playback.sample(.28, &sample) && std::fabs(sample.position[0] - .195f) < .001f);
+    assert(playback.sample(.5, &sample) && std::fabs(sample.position[0] - .215f) < .001f);
+    moving.sequence++;
+    moving.position[0] = 3;
+    assert(playback.accept(moving, .5));
+    assert(playback.sample(.5, &sample) && std::fabs(sample.position[0] - .215f) < .001f);
+    assert(playback.sample(.69, &sample) && sample.position[0] == 3);
+    moving.sequence++;
+    moving.position[0] = 12;
+    assert(playback.accept(moving, .7));
+    assert(playback.sample(.86, &sample) && std::fabs(sample.position[0] - 12.2f) < .001f);
+
+    auto bladderfish = live;
+    bladderfish.species = Species::Bladderfish;
+    assert(tech_for_species(bladderfish.species) == 2515);
+    assert(species_for_tech(2515) == Species::Bladderfish);
+    assert(encode(bladderfish, &wire) && wire[1] == 2);
+    assert(decode(wire.data(), wire.size(), &decoded) && same_run(decoded, bladderfish));
+    bladderfish.sequence++;
+    assert(!runtime.accept(bladderfish, 2)); // Same GUID with a different species is not the same stream.
+    bad = request; bad.species = Species::Bladderfish; assert(!valid(bad));
+    wire[1] = 3; assert(!decode(wire.data(), wire.size(), &decoded));
     // Slow frames and reordered UDP cannot roll a pending pose backwards.
     Mailbox inbox;
     assert(inbox.push(live));
