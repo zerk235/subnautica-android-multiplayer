@@ -4,6 +4,7 @@
 #define SNMOD_WORLD_TEST_ROOT "/data/local/tmp/snmod_pose_transport_tests"
 #include "modloader/src/world.cpp"
 #include "modloader/src/net.cpp"
+#include "modloader/src/avatar_locomotion.h"
 #include <cassert>
 
 void mod_logf(const char*, const char*, ...) {}
@@ -18,7 +19,34 @@ void matching_presence() {
     remote.host_id = g_session.host_id;
     memcpy(remote.session_id, g_session.session_id, 16);
 }
+
+void check_water_to_roof() {
+    assert(avatar_near_water_surface(4.25f, 4.0f));
+    assert(!avatar_near_water_surface(5.0f, 4.0f));
+    assert(!avatar_near_water_surface(3.0f, 4.0f));
+
+    PeerState peer{};
+    peer.flags = kFlagSwimming | kFlagUnderwater;
+    auto pose = read_peer_locomotion(peer);
+    assert(pose.underwater && !pose.on_surface && !pose.fast_swim);
+
+    peer.flags |= kFlagOnSurface | kFlagFastSwimming;
+    peer.anim_float_count = 1;
+    pose = read_peer_locomotion(peer);
+    assert(!pose.underwater && pose.on_surface && pose.fast_swim);
+
+    // A legacy sender marks outdoor walking as on_surface, including the lifepod roof.
+    peer.flags = kFlagWalking | kFlagOnSurface;
+    pose = read_peer_locomotion(peer);
+    assert(!pose.underwater && !pose.on_surface && !pose.fast_swim);
+
+    peer.flags = kFlagSwimming | kFlagOnSurface;
+    pose = read_peer_locomotion(peer);
+    assert(!pose.underwater && pose.on_surface && !pose.fast_swim);
+}
+
 int main() {
+    check_water_to_roof();
     pthread_once(&g_peers_lock_once, init_peers_lock);
     g_local_id = 1;
     g_session.local_member = g_session.local_has_world = true;
@@ -43,22 +71,36 @@ int main() {
     LocalState local{};
     local.valid = true;
     local.x = 12.5f; local.y = -8; local.z = 100;
-    local.flags = kFlagSwimming;
+    local.flags = kFlagSwimming | kFlagFastSwimming | kFlagUnderwater;
+    local.anim_float_count = 1;
+    local.anim_underwater = 1;
     int error = -1;
     assert(send_state(*peer,local,&error) == sizeof(StatePacket) && error == 0);
     StatePacket packet{};
     assert(recv(receiver,&packet,sizeof(packet),0) == sizeof(packet));
     assert(packet.id == 1 && packet.x == local.x && packet.flags == local.flags);
+    const double sent_age = net_sent_pose_age(peer->id, packet.sequence);
+    assert(sent_age >= 0 && sent_age <= creature_motion::kBitePoseMaxAge);
+    assert(net_sent_pose_age(peer->id + 1, packet.sequence) < 0);
+    assert(net_sent_pose_age(peer->id, packet.sequence + 1) < 0);
+    g_sent_poses[0].sent_at -= 2.0;
+    assert(net_sent_pose_age(peer->id, packet.sequence) > creature_motion::kBitePoseMaxAge);
     packet.id = 2;
+    double accepted_at = monotonic_seconds();
     auto receive = [&] {
         handle_packet(reinterpret_cast<uint8_t*>(&packet),sizeof(packet),endpoint,
-                      monotonic_seconds());
+                      accepted_at);
     };
     receive();
     assert(g_pose_stream[0].rx_seen == 1 && g_pose_stream[0].rx_applied == 1);
-    assert(peer->x == 12.5f);
+    assert(peer->x == 12.5f && peer->pose_received_at == accepted_at);
+    auto swim = read_peer_locomotion(*peer);
+    assert(swim.fast_swim && swim.underwater && !swim.on_surface);
+    const double first_pose = accepted_at;
+    accepted_at += kStateInterval;
     receive();
     assert(g_pose_stream[0].rx_seen == 2 && g_pose_stream[0].rx_stale == 1);
+    assert(peer->pose_received_at == first_pose);
     packet.sequence++;
     g_remote[0].flags &= ~kSessionFlagHasWorld;
     receive();
@@ -66,6 +108,7 @@ int main() {
     assert(strcmp(g_pose_stream[0].last_rx_block,"remote_world_missing") == 0);
     matching_presence(); receive();
     assert(g_pose_stream[0].rx_applied == 2 && peer->sequence == packet.sequence);
+    assert(peer->pose_received_at == accepted_at);
     // Removing the missing-world cause resumes immediately. A foreign session stays blocked.
     g_remote[0].session_id[1] = 9;
     packet.sequence++; receive();

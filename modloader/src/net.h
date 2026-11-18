@@ -22,8 +22,9 @@ constexpr size_t kMaxPeers = 7;
 constexpr double kPeerTimeout = 5.0;
 constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
+constexpr double kVehicleInterval = 0.1;  // 10 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 37;  // Bladderfish pose and pickup sync
+constexpr uint16_t kSessionProtocolVersion = 41;  // Stalker poses and bites
 #else
 constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
 #endif
@@ -35,15 +36,14 @@ constexpr uint32_t kFlagSeamoth = 1u << 2;
 constexpr uint32_t kFlagWalking = 1u << 3;
 constexpr uint32_t kFlagInside = 1u << 4;
 constexpr uint32_t kFlagPiloting = 1u << 5;
-// The Animator picks its locomotion state from is_underwater / on_surface, and those are
-// driven by Player.IsUnderwaterForSwimming on the local side. IsSwimming alone is not enough:
-// a diver walking along the seabed is also "swimming", so the two states travel separately.
+// Water states are separate from the movement motor. OnSurface describes surface swimming.
 constexpr uint32_t kFlagUnderwater = 1u << 6;
 constexpr uint32_t kFlagOnSurface = 1u << 7;
 // Tool-in-use moment (knife swing, scanner scan...): the peer plays the use, not just the hold.
 constexpr uint32_t kFlagUsingTool = 1u << 8;
 constexpr uint32_t kFlagToolLight = 1u << 9;
 constexpr uint32_t kFlagHeldWorldPose = 1u << 10;
+constexpr uint32_t kFlagFastSwimming = 1u << 11;
 
 // Number of Animator float parameters carried in the state packet. The controller has exactly
 // thirteen today and the cap leaves room, but the payload is sized by this constant on both
@@ -56,6 +56,7 @@ struct PeerState {
     uint16_t port;
     double last_seen;
     double last_sent;
+    double pose_received_at; // local monotonic time of the last accepted STATE
     uint32_t sequence;
     // Pump-side reorder guard: STATE arrives at 20 Hz over UDP and a late
     // duplicate must not roll pose/flags back (e.g. clear the piloting bit a
@@ -83,7 +84,7 @@ struct PeerState {
     uint32_t suit_tech;
     uint32_t fins_tech;
     uint32_t head_tech;
-    uint8_t environment_id[16]; // exact shared SubRoot identity; zero outdoors/unknown
+    uint8_t environment_id[16]; // shared SubRoot identity or lifepod marker; zero outdoors/unknown
     struct sockaddr_in raw;
     bool active;
     float anim_floats[kNetAnimFloats];
@@ -128,6 +129,7 @@ void net_init();
 
 // Called from the game thread; hands the latest pose to the pump thread.
 void net_publish(const LocalState& local);
+double net_sent_pose_age(uint32_t recipient, uint32_t sequence);
 
 // Day/night clock, ported from the zcode session's world sync v2. The game thread reports the
 // local DayNightCycle clock every frame; while this phone is the host the pump ships it to the
@@ -204,6 +206,8 @@ SessionJoinStatus net_session_reason();
 void net_session_detail(char* out, size_t capacity);
 bool net_session_is_host();
 uint32_t net_session_host_id();
+// Returns the joined host world's identity only for the matching guest slot.
+bool net_session_guest_world(const char* slot, uint8_t out_guid[16]);
 
 // UI-facing session API. Join targets one exact host/session and is refused while this
 // device already has a loaded world. Leave is explicit; returning to the menu is not leave.
@@ -328,6 +332,7 @@ enum WorldEventKind : uint8_t {
     kWorldEventRemove = 5,
     kWorldEventLockerContents = 6,
     kWorldEventFishPickup = 7,
+    kWorldEventSharedProgress = 8,
 };
 
 // build_flags bits for the build kinds. complete/isInside/forceUpright/rotatable/attached
@@ -346,13 +351,12 @@ constexpr uint8_t kWorldBuildHasGeometry = 0x40;
 #endif
 
 // Room for the builder's UniqueIdentifier.Id string (a 36-character GUID with room for the
-// longer ids the game can hand out). Build events carry it; pickup/drop events leave it
-// empty and address the object by guid alone.
+// longer ids the game can hand out). Build events and drops that can create a copy carry it.
 constexpr int kWorldEventObjectIdSize = 128;
 
 // guid is the object's UniqueIdentifier. It is the only stable handle that both phones agree on:
 // managed pointers differ per process and a name collides between every instance of a prefab.
-// For pickup/drop only the kind/guid/pose/velocity fields are meaningful; build kinds add
+// Drops of supported resources also carry object_id and tech_type; build kinds add
 // object_id/class_id/tech_type/constructed_amount/build_flags, and anchored base pieces
 // (ConstructableBase modules) add the v2 anchor tail: the serialized anchors the game itself
 // keeps on ConstructableBase and resolves on load (dump.cs 11474). The struct is the game-side

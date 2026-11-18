@@ -44,5 +44,14 @@ int main() {
     std::memset(v.classId,'X',sizeof(v.classId));assert(!occupant());
     std::memcpy(v.classId,"Exosuit",8);assert(!occupant());
     std::memcpy(v.classId,"SeaMoth",8);v.seq_valid=false;assert(!occupant());
+
+    // A newer exit releases the previous pilot's old pose for the same GUID.
+    // The next pilot can drive while that snapshot remains in the receive table.
+    v.seq_valid=true;v.sequence=100;
+    p.flags=0;p.sequence=101;
+    vehicles[1]=v;vehicles[1].active=true;vehicles[1].pilot=30;
+    peers[1]=p;peers[1].id=30;peers[1].flags=kFlagPiloting;
+    assert(occupant()==30);
+    peers[1].flags=0;assert(!occupant());
     puts("vehicle occupancy: occupied/free, exit/reentry, disconnect, expiry, vehicle switch, reorder and wrap passed");
 }

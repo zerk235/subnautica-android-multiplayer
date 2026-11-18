@@ -10,10 +10,12 @@
 #include <unistd.h>
 #include <time.h>
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "log.h"
+#include "guest_progress.h"
 #include "save_backup_access.h"
 
 namespace {
@@ -571,6 +573,135 @@ bool world_slot_is_host_received(const char* slot) {
     return info.st_size > 0 && info.st_size < 256;
 }
 
+namespace {
+namespace gp = guest_progress;
+constexpr uint8_t kProfileMagic[] = {'S', 'N', 'G', '1'};
+
+void guest_profile_path(const uint8_t world[16], char (&path)[560]) {
+    char name[33]{};
+    for (int i = 0; i < 16; i++) snprintf(name + i * 2, 3, "%02x", world[i]);
+    snprintf(path, sizeof(path), "%s/.snmp-guest-%s.bin", kSavesRoot, name);
+}
+
+bool write_atomic_file(const char* path, gp::View bytes) {
+    char temporary[640];
+    if (snprintf(temporary, sizeof(temporary), "%s.part", path) >= int(sizeof(temporary))) return false;
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0660);
+    if (fd < 0) return false;
+    while (!bytes.empty()) {
+        const ssize_t n = write(fd, bytes.data(), bytes.size());
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        bytes.remove_prefix(size_t(n));
+    }
+    const bool flushed = bytes.empty() && fsync(fd) == 0;
+    const bool closed = close(fd) == 0;
+    if (flushed && closed && rename(temporary, path) == 0) return true;
+    unlink(temporary);
+    return false;
+}
+
+bool guest_scene_with_profile(gp::Bytes& scene) try {
+    uint8_t world[16];
+    if (!world_receive_content_guid(world)) return true;  // Session gate verifies this in net.cpp.
+    char path[560];
+    guest_profile_path(world, path);
+    struct stat info{};
+    if (lstat(path, &info) != 0) return errno == ENOENT;
+    if (!S_ISREG(info.st_mode) || info.st_size <= 8 || info.st_size > gp::kMaxScene + 8) return false;
+    uint8_t* data = nullptr;
+    uint32_t size = 0;
+    if (!read_whole_file(path, &data, &size)) return false;
+    std::unique_ptr<uint8_t, decltype(&free)> storage(data, free);
+    if (size <= 8 || memcmp(data, kProfileMagic, sizeof(kProfileMagic))) return false;
+    uint32_t checksum = 0;
+    for (unsigned i = 0; i < 4; ++i) checksum |= uint32_t(data[4 + i]) << (i * 8);
+    const gp::View profile(data + 8, size - 8);
+    if (world_checksum(profile.data(), profile.size()) != checksum) return false;
+    for (int i = 0; i < kWorldFileCount; ++i) {
+        if (strcmp(g_manifest.files[i].name, "scene-objects.bin") == 0) {
+            return gp::overlay({g_recv[i], g_recv_size[i]}, profile, scene);
+        }
+    }
+    return false;
+} catch (...) { return false; }
+} // namespace
+
+static bool guest_file_stamp(const char* path, WorldGuestSaveStamp::File& stamp) {
+    struct stat info{};
+    if (lstat(path, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 ||
+        uint64_t(info.st_size) > kMaxFileBytes) return false;
+    stamp = {uint64_t(info.st_size), uint64_t(info.st_dev), uint64_t(info.st_ino),
+             info.st_mtim.tv_sec, info.st_mtim.tv_nsec};
+    return true;
+}
+
+bool world_guest_save_stamp(const char* slot, const uint8_t joined_world[16], WorldGuestSaveStamp* stamp) {
+    if (!stamp || !joined_world || !world_slot_is_host_received(slot)) return false;
+    WorldGuestSaveStamp result;
+    char path[560];
+    snprintf(path, sizeof(path), "%s/%s/gameinfo.json", kSavesRoot, slot);
+    if (!guest_file_stamp(path, result.gameinfo)) return false;
+    uint8_t* data = nullptr;
+    uint32_t size = 0;
+    if (!read_whole_file(path, &data, &size)) return false;
+    uint8_t native_world[16];
+    const bool native_guid = parse_session_guid(data, size, native_world);
+    free(data);
+    // Unity can clear its session field when a guest saves. The joined world is
+    // authoritative for this received slot. An explicit conflicting GUID still fails.
+    if (native_guid && memcmp(native_world, joined_world, sizeof(native_world)) != 0) return false;
+    WorldGuestSaveStamp::File gameinfo_after;
+    if (!guest_file_stamp(path, gameinfo_after) || !(result.gameinfo == gameinfo_after)) return false;
+    snprintf(path, sizeof(path), "%s/%s/scene-objects.bin", kSavesRoot, slot);
+    if (!guest_file_stamp(path, result.scene)) return false;
+    memcpy(result.world, joined_world, sizeof(result.world));
+    *stamp = result;
+    return true;
+}
+
+bool world_guest_checkpoint(const char* slot, const WorldGuestSaveStamp& before) try {
+    WorldGuestSaveStamp after;
+    if (!world_guest_save_stamp(slot, before.world, &after) || before.gameinfo == after.gameinfo ||
+        before.scene == after.scene) return false;
+    char path[560];
+    snprintf(path, sizeof(path), "%s/%s/scene-objects.bin", kSavesRoot, slot);
+    uint8_t* data = nullptr;
+    uint32_t size = 0;
+    if (!read_whole_file(path, &data, &size)) return false;
+    std::unique_ptr<uint8_t, decltype(&free)> storage(data, free);
+    WorldGuestSaveStamp confirmed;
+    if (!world_guest_save_stamp(slot, before.world, &confirmed) ||
+        !(after.gameinfo == confirmed.gameinfo) || !(after.scene == confirmed.scene)) return false;
+    gp::Bytes profile;
+    if (!gp::extract({data, size}, profile)) return false;
+    gp::Bytes file(std::begin(kProfileMagic), std::end(kProfileMagic));
+    const uint32_t checksum = world_checksum(profile.data(), profile.size());
+    for (unsigned i = 0; i < 4; ++i) file.push_back(uint8_t(checksum >> (i * 8)));
+    gp::put(file, gp::view(profile));
+    guest_profile_path(before.world, path);
+    if (!write_atomic_file(path, gp::view(file))) return false;
+    LOG_INFO("guest progress: checkpoint saved for slot %s (%zu bytes)", slot, profile.size());
+    return true;
+} catch (...) { return false; }
+
+bool world_guest_profile_applied(const char* slot) {
+    if (!slot_name_is_plain(slot) || !world_slot_is_host_received(slot)) return false;
+    char path[560];
+    snprintf(path, sizeof(path), "%s/%s/.snmp_guest_applied", kSavesRoot, slot);
+    struct stat info{};
+    return lstat(path, &info) == 0 && S_ISREG(info.st_mode) && info.st_size == 1;
+}
+
+bool world_guest_receive_has_profile() {
+    uint8_t world[16];
+    if (!world_receive_content_guid(world)) return false;
+    char path[560];
+    guest_profile_path(world, path);
+    struct stat info{};
+    return lstat(path, &info) == 0;
+}
+
 WorldSlotCheck world_slot_exists(const char* slot, const WorldManifest& manifest) {
     if (!slot_name_is_plain(slot) || manifest.file_count != kWorldFileCount) {
         LOG_ERROR("world: slot check rejected invalid name/manifest");
@@ -661,6 +792,11 @@ bool world_write_slot(const WorldManifest& manifest,bool preserve_local) {
         LOG_ERROR("world: refusing to write slot '%s', name is not plain", manifest.slot);
         return false;
     }
+    gp::Bytes guest_scene;
+    if (!guest_scene_with_profile(guest_scene)) {
+        LOG_ERROR("guest progress: checkpoint could not be restored; previous slot retained");
+        return false;
+    }
 
     char dir[512];
     snprintf(dir, sizeof(dir), "%s/%s", kSavesRoot, manifest.slot);
@@ -748,9 +884,12 @@ bool world_write_slot(const WorldManifest& manifest,bool preserve_local) {
             goto fail;
         }
 
+        const bool apply_profile = !guest_scene.empty() && !strcmp(manifest.files[i].name, "scene-objects.bin");
+        const uint8_t* data = apply_profile ? guest_scene.data() : g_recv[i];
+        const uint32_t size = apply_profile ? uint32_t(guest_scene.size()) : g_recv_size[i];
         uint32_t written = 0;
-        while (written < g_recv_size[i]) {
-            ssize_t put = write(fd, g_recv[i] + written, g_recv_size[i] - written);
+        while (written < size) {
+            ssize_t put = write(fd, data + written, size - written);
             if (put <= 0) {
                 LOG_ERROR("world: write %s failed after %u bytes: %s", temp_path, written,
                           strerror(errno));
@@ -770,7 +909,7 @@ bool world_write_slot(const WorldManifest& manifest,bool preserve_local) {
             goto fail;
         }
         LOG_INFO("world: staged %s/%s (%u bytes)", manifest.slot, manifest.files[i].name,
-                 g_recv_size[i]);
+                 size);
     }
 
     // Marker is part of the staged transaction, before the final slot is visible.
@@ -779,6 +918,13 @@ bool world_write_slot(const WorldManifest& manifest,bool preserve_local) {
         int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL,0660);if(fd<0)goto fail;
         bool ok=write(fd,"host transfer\n",14)==14 && fsync(fd)==0;close(fd);
         if(!ok)goto fail;
+    }
+    if (!guest_scene.empty()) {
+        char marker[640];
+        snprintf(marker, sizeof(marker), "%s/.snmp_guest_applied", staging);
+        constexpr uint8_t saved[] = {1};
+        if (!write_atomic_file(marker, {saved, sizeof(saved)})) goto fail;
+        LOG_INFO("guest progress: restored checkpoint into staged slot %s", manifest.slot);
     }
 
     // Commit a new slot with one rename. For an authorized refresh, retain the old

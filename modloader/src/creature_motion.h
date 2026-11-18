@@ -11,16 +11,22 @@
 
 namespace creature_motion {
 using Id=std::array<uint8_t,16>;
-enum class Species : uint8_t { Boomerang, Peeper, Bladderfish, Unknown = 255 };
-constexpr std::array kLiveSpecies{Species::Boomerang, Species::Peeper, Species::Bladderfish};
+enum class Species : uint8_t { Boomerang, Peeper, Bladderfish, Hoopfish, Stalker, Unknown = 255 };
+constexpr std::array kLiveSpecies{
+    Species::Boomerang, Species::Peeper, Species::Bladderfish, Species::Hoopfish, Species::Stalker,
+};
 constexpr int kBoomerangTech = 2510;
 constexpr int kPeeperTech = 2504;
 constexpr int kBladderfishTech = 2515;
+constexpr int kHoopfishTech = 2531;
+constexpr int kStalkerTech = 2512;
 constexpr int tech_for_species(Species species) {
     switch (species) {
         case Species::Boomerang: return kBoomerangTech;
         case Species::Peeper: return kPeeperTech;
         case Species::Bladderfish: return kBladderfishTech;
+        case Species::Hoopfish: return kHoopfishTech;
+        case Species::Stalker: return kStalkerTech;
         default: return 0;
     }
 }
@@ -30,7 +36,8 @@ constexpr Species species_for_tech(int tech) {
     return Species::Unknown;
 }
 constexpr bool supported_tech(int tech) {
-    return species_for_tech(tech) != Species::Unknown;
+    const auto species = species_for_tech(tech);
+    return species != Species::Unknown && species != Species::Stalker;
 }
 enum Kind:uint8_t { Request=1, Pose=2, End=3, Refuse=4, LivePose=5 };
 constexpr size_t kLiveFishLimit = 40;
@@ -38,7 +45,10 @@ constexpr size_t kLiveSendPerTick = 8;
 constexpr size_t kLiveQueueCapacity = 64;
 constexpr size_t kControlQueueCapacity = 32;
 constexpr double kLivePoseInterval = .1;
-constexpr size_t kWireSize=112;
+constexpr size_t kWireSize = 112;
+constexpr size_t kStalkerWireSize = kWireSize + 16;
+constexpr double kBitePoseMaxAge = 0.95;
+constexpr float kMaxBiteDamage = 60.0f;
 constexpr double kRunSeconds=60, kGuestDeadline=65;
 inline bool controlled_gap(bool enabled,double elapsed) {
     return enabled&&std::isfinite(elapsed)&&elapsed>=20&&elapsed<25;
@@ -50,6 +60,13 @@ inline Bearing bearing(float dx,float dz,float view_yaw) {
     if(std::fabs(angle)>=155)return Bearing::Behind;
     return angle>0?Bearing::Right:Bearing::Left;
 }
+struct Bite {
+    uint32_t serial = 0;
+    uint32_t victim = 0;
+    uint32_t victim_pose = 0;
+    float damage = 0;
+};
+
 struct Message {
     Kind kind=Request;
     Species species=Species::Boomerang;
@@ -58,6 +75,7 @@ struct Message {
     Id session{},fish{},prefab{};
     std::array<float,3> position{};
     std::array<float,4> rotation{0,0,0,1};
+    Bite bite{};
 };
 inline bool nonzero(const Id& id){for(auto b:id)if(b)return true;return false;}
 // Preserve per-fish deadlines when distance sorting changes. A slow frame never
@@ -94,6 +112,26 @@ public:
     }
 };
 inline bool newer(uint32_t a,uint32_t b){const uint32_t d=a-b;return d&&d<0x80000000u;}
+inline bool valid_bite(const Message& m) {
+    const auto& bite = m.bite;
+    if (!bite.serial) return !bite.victim && !bite.victim_pose && bite.damage == 0;
+    if (m.kind != LivePose || m.species != Species::Stalker || !bite.victim) return false;
+    // The host's own game already applied its native hit. That event is visual only.
+    if (bite.victim == m.host) return !bite.victim_pose && bite.damage == 0;
+    return bite.victim_pose && bite.damage > 0 && bite.damage <= kMaxBiteDamage;
+}
+
+inline bool new_bite(const Bite& bite, uint32_t previous) {
+    return bite.serial && (!previous || newer(bite.serial, previous));
+}
+
+inline bool bite_reaches_player(const Bite& bite, uint32_t local_id, bool exposed,
+                               double pose_age, float distance_squared) {
+    return local_id && bite.victim == local_id && bite.damage > 0 && exposed &&
+           pose_age >= 0 && pose_age <= kBitePoseMaxAge &&
+           distance_squared >= 0 && distance_squared <= 36.0f;
+}
+
 inline bool valid(const Message& m) {
     if(m.kind<Request||m.kind>LivePose||!m.host||!m.epoch||!m.sender||
        !m.nonce||!nonzero(m.session)||!nonzero(m.fish)||!nonzero(m.prefab))return false;
@@ -105,7 +143,7 @@ inline bool valid(const Message& m) {
     } else if (!m.target || m.sender == m.target) {
         return false;
     }
-    if(m.elapsed_ms>60000||(m.kind==Pose&&!m.sequence))return false;
+    if(m.elapsed_ms>60000||(m.kind==Pose&&!m.sequence)||!valid_bite(m))return false;
     for(float v:m.position)if(!std::isfinite(v)||std::fabs(v)>100000)return false;
     float norm=0;for(float v:m.rotation){if(!std::isfinite(v))return false;norm+=v*v;}
     return norm>.99f&&norm<1.01f;
@@ -114,20 +152,38 @@ inline void put32(uint8_t* p,uint32_t v){for(int i=0;i<4;++i)p[i]=uint8_t(v>>(8*
 inline uint32_t get32(const uint8_t* p){uint32_t v=0;for(int i=0;i<4;++i)v|=uint32_t(p[i])<<(8*i);return v;}
 inline bool encode(const Message& m,std::vector<uint8_t>* out) {
     if(!out||!valid(m))return false;
-    out->assign(kWireSize,0);auto* p=out->data();p[0]=m.kind;p[1]=uint8_t(m.species);
+    const bool stalker = m.species == Species::Stalker;
+    out->assign(stalker ? kStalkerWireSize : kWireSize,0);auto* p=out->data();p[0]=m.kind;p[1]=uint8_t(m.species);
     uint32_t values[]={m.host,m.epoch,m.sender,m.target,m.sequence,m.elapsed_ms};
     for(int i=0;i<6;++i)put32(p+4+i*4,values[i]);
     put32(p+28,uint32_t(m.nonce));put32(p+32,uint32_t(m.nonce>>32));
     std::memcpy(p+36,m.session.data(),16);std::memcpy(p+52,m.fish.data(),16);std::memcpy(p+68,m.prefab.data(),16);
     for(int i=0;i<7;++i){float v=i<3?m.position[i]:m.rotation[i-3];uint32_t b;std::memcpy(&b,&v,4);put32(p+84+4*i,b);}
+    if (stalker) {
+        put32(p + 112, m.bite.serial);
+        put32(p + 116, m.bite.victim);
+        put32(p + 120, m.bite.victim_pose);
+        uint32_t damage;
+        std::memcpy(&damage, &m.bite.damage, sizeof(damage));
+        put32(p + 124, damage);
+    }
     return true;
 }
 inline bool decode(const uint8_t* p,size_t size,Message* out) {
-    if(!p||!out||size!=kWireSize||p[2]||p[3])return false;
+    if(!p||!out||(size!=kWireSize&&size!=kStalkerWireSize)||p[2]||p[3])return false;
+    const bool stalker = Species(p[1]) == Species::Stalker;
+    if (stalker != (size == kStalkerWireSize)) return false;
     Message m;m.kind=Kind(p[0]);m.species=Species(p[1]);m.host=get32(p+4);m.epoch=get32(p+8);m.sender=get32(p+12);m.target=get32(p+16);
     m.sequence=get32(p+20);m.elapsed_ms=get32(p+24);m.nonce=uint64_t(get32(p+28))|(uint64_t(get32(p+32))<<32);
     std::memcpy(m.session.data(),p+36,16);std::memcpy(m.fish.data(),p+52,16);std::memcpy(m.prefab.data(),p+68,16);
     for(int i=0;i<7;++i){uint32_t b=get32(p+84+4*i);float v;std::memcpy(&v,&b,4);if(i<3)m.position[i]=v;else m.rotation[i-3]=v;}
+    if (stalker) {
+        m.bite.serial = get32(p + 112);
+        m.bite.victim = get32(p + 116);
+        m.bite.victim_pose = get32(p + 120);
+        const uint32_t damage = get32(p + 124);
+        std::memcpy(&m.bite.damage, &damage, sizeof(damage));
+    }
     if(!valid(m))return false;*out=m;return true;
 }
 inline bool same_run(const Message& a,const Message& b) {

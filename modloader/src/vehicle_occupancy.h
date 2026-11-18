@@ -14,17 +14,21 @@ inline bool vehicle_pose_fresh(const VehicleState& pose,double now,double timeou
     return pose.active&&pose.seq_valid&&pose.pilot&&std::isfinite(age)&&age>=0&&age<=timeout;
 }
 
-inline std::uint32_t remote_seamoth_pilot(const std::uint8_t guid[16],std::uint32_t local_id,
+inline bool is_seamoth_vehicle(const char class_id[16]) {
+    return std::memcmp(class_id, "SeaMoth", sizeof("SeaMoth")) == 0;
+}
+
+inline std::uint32_t remote_vehicle_pilot(const char* class_id, const std::uint8_t guid[16], std::uint32_t local_id,
     const VehicleState* vehicles,std::size_t vehicle_count,const PeerState* peers,std::size_t peer_count,
     double now,double timeout=kPeerTimeout) {
-    if(!guid||!vehicles||!peers||!std::isfinite(now))return 0;
+    if(!class_id||!guid||!vehicles||!peers||!std::isfinite(now))return 0;
     const std::uint8_t zero[16]{};
     if(!std::memcmp(guid,zero,16))return 0;
     std::uint32_t occupied_by=0;
     for(std::size_t i=0;i<vehicle_count;++i) {
         const auto& pose=vehicles[i];
         if(!vehicle_pose_fresh(pose,now,timeout)||pose.pilot==local_id||
-           std::memcmp(pose.guid,guid,16)||std::memcmp(pose.classId,"SeaMoth",7)||pose.classId[7])continue;
+           std::memcmp(pose.guid,guid,16)||std::strncmp(class_id,pose.classId,sizeof(pose.classId))!=0)continue;
         const PeerState* pilot=nullptr;
         for(std::size_t p=0;p<peer_count;++p) {
             const double age=now-peers[p].last_seen;
@@ -45,4 +49,15 @@ inline std::uint32_t remote_seamoth_pilot(const std::uint8_t guid[16],std::uint3
         if(!occupied_by||pose.pilot<occupied_by)occupied_by=pose.pilot;
     }
     return occupied_by;
+}
+
+inline bool is_cyclops_vehicle(const char class_id[16]) {
+    return std::memcmp(class_id, "Cyclops", sizeof("Cyclops")) == 0;
+}
+
+inline std::uint32_t remote_seamoth_pilot(const std::uint8_t guid[16], std::uint32_t local_id,
+    const VehicleState* vehicles, std::size_t vehicle_count, const PeerState* peers,
+    std::size_t peer_count, double now, double timeout=kPeerTimeout) {
+    return remote_vehicle_pilot("SeaMoth", guid, local_id, vehicles, vehicle_count,
+                                peers, peer_count, now, timeout);
 }

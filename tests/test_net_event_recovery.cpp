@@ -3,6 +3,8 @@
 #define SNMOD_WORLD_TEST_ROOT "/data/local/tmp/snmod_event_recovery_tests"
 #include "modloader/src/world.cpp"
 #include "modloader/src/net.cpp"
+#include "modloader/src/item_drop_sync.h"
+#include "modloader/src/shared_progress.h"
 #include <cassert>
 #include <vector>
 #include <algorithm>
@@ -233,6 +235,91 @@ int main() {
     assert(decoded[0].tech_type==1504&&decoded[0].build_flags==interior.build_flags);
     assert(!memcmp(decoded[0].interior_parent_guid,interior.interior_parent_guid,16));
     assert(!memcmp(decoded[0].interior_local_pose,local_pose,sizeof(local_pose)));
+
+    // A recovery-capable drop must carry the original Id and type on the wire.
+    // A pickup arriving while the prefab is loading cancels the pending drop.
+    ++g_session.epoch;
+    activate(a, c);
+    WorldEvent drop{};
+    drop.kind = kWorldEventDrop;
+    drop.tech_type = 52; // Ruby, from an area where the guest may lack the original.
+    drop.guid[0] = 42;
+    drop.qw = 1;
+    drop.x = 12;
+    drop.vz = 0.5f;
+    strcpy(drop.object_id, "dropped-ruby");
+    net_post_world_event(drop, true);
+    WorldEvent pickup{};
+    pickup.kind = kWorldEventPickup;
+    pickup.tech_type = drop.tech_type;
+    memcpy(pickup.guid, drop.guid, sizeof(pickup.guid));
+    strcpy(pickup.object_id, drop.object_id);
+    net_post_world_event(pickup, true);
+    service();
+    packets = read_packets(c);
+    activate(c, a);
+    feed(packets, a);
+    assert(net_copy_world_events(decoded, 4) == 2);
+    assert(item_drop_sync::valid_spawn(decoded[0]));
+    assert(decoded[0].tech_type == drop.tech_type && strcmp(decoded[0].object_id, drop.object_id) == 0 &&
+           decoded[0].x == drop.x && decoded[0].vz == drop.vz);
+    assert(item_drop_sync::near_drop(decoded[0], 0, 0, 0));
+    assert(!item_drop_sync::near_drop(decoded[0], 50, 0, 0));
+    assert(decoded[1].kind == kWorldEventPickup &&
+           item_drop_sync::supersedes(decoded[1], decoded[0]));
+    decoded[1].guid[0]++;
+    assert(!item_drop_sync::supersedes(decoded[1], decoded[0]));
+    for (int tech : {3, 15, 17, 32, 35, 62, 2503, 3501, 3502, 3504}) {
+        decoded[0].tech_type = tech;
+        assert(item_drop_sync::valid_spawn(decoded[0]));
+    }
+    auto resource_pickup = decoded[1];
+    assert(resource_pickup.tech_type == pickup.tech_type &&
+           strcmp(resource_pickup.object_id, pickup.object_id) == 0);
+    assert(item_drop_sync::has_resource_identity(resource_pickup));
+    assert(!item_drop_sync::valid_spawn(resource_pickup));
+    resource_pickup.object_id[0] = '\0';
+    assert(!item_drop_sync::has_resource_identity(resource_pickup));
+    decoded[0].tech_type = 758; // Grav Trap has instance state.
+    assert(!item_drop_sync::valid_spawn(decoded[0]));
+    decoded[0].tech_type = 16;
+    memset(decoded[0].object_id, 'x', sizeof(decoded[0].object_id));
+    assert(!item_drop_sync::valid_spawn(decoded[0]));
+
+    ++g_session.epoch;
+    activate(a, c);
+    WorldEvent shared{};
+    shared.kind = kWorldEventSharedProgress;
+    shared.build_flags = shared_progress::PodRepair;
+    shared.constructed_amount = 1;
+    assert(net_try_post_world_event(shared));
+    shared.build_flags = shared_progress::Door;
+    shared.reserved16 = shared_progress::Open | shared_progress::Unlocked | shared_progress::Unsealed;
+    strcpy(shared.object_id, "wreck-id/4/1");
+    assert(net_try_post_world_event(shared));
+    shared.build_flags = shared_progress::Blueprint;
+    shared.tech_type = 504;
+    assert(net_try_post_world_event(shared));
+    WorldEvent radio{};
+    radio.kind = kWorldEventSharedProgress;
+    radio.build_flags = shared_progress::RadioRepair;
+    radio.constructed_amount = 0.75f;
+    assert(net_try_post_world_event(radio));
+    service();
+    packets = read_packets(c);
+    activate(c, a);
+    feed(packets, a);
+    assert(net_copy_world_events(decoded, 4) == 4);
+    for (const auto& event : decoded) assert(event.kind == shared.kind && shared_progress::valid(event));
+    assert(decoded[0].constructed_amount == 1 && decoded[1].reserved16 == 7 &&
+           !strcmp(decoded[1].object_id, "wreck-id/4/1") && decoded[2].tech_type == 504);
+    decoded[1].reserved16 = 0x8000;
+    assert(!shared_progress::valid(decoded[1]));
+    assert(decoded[3].build_flags == shared_progress::RadioRepair &&
+           decoded[3].constructed_amount == 0.75f);
+    decoded[3].constructed_amount = NAN;
+    assert(!shared_progress::valid(decoded[3]));
+
     // Locker payload is opaque: byte values may include zero, NaN bit patterns
     // and unterminated strings. Only kind 6 may use this alternative layout.
     ++g_session.epoch;activate(a,c);
@@ -309,6 +396,20 @@ int main() {
     assert(g_session.world_refresh_pending && g_session.state == kSessionGuest);
     assert(g_events.next_sequence == 2000);
     puts("PASS: concurrent guest pickup events and host world refresh");
+
+    strcpy(g_session.slot, "guest-world");
+    const uint8_t joined_world[16]{0x35};
+    memcpy(g_session.content_guid, joined_world, sizeof(joined_world));
+    g_session.content_guid_valid = true;
+    uint8_t checkpoint_world[16]{};
+    assert(net_session_guest_world("guest-world", checkpoint_world));
+    assert(memcmp(joined_world, checkpoint_world, sizeof(joined_world)) == 0);
+    assert(!net_session_guest_world("another-world", checkpoint_world));
+    g_session.explicit_leave = true;
+    assert(!net_session_guest_world("guest-world", checkpoint_world));
+    g_session.explicit_leave = false;
+    g_session.local_host = true;
+    assert(!net_session_guest_world("guest-world", checkpoint_world));
 
     close(a.socket); close(b.socket); close(c.socket);
     puts("PASS: real UDP ordered first packet, lost ACK, 31s outage, offline actions, endpoint/slot reuse, new recipient baseline, forged ACK gates, bounded history gap and session reset");

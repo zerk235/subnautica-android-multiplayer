@@ -138,13 +138,16 @@ void* contents_constructable(const std::string& id) {
     WorldEvent e{};snprintf(e.object_id,sizeof(e.object_id),"%s",id.c_str());
     return build_find(e);
 }
+constexpr char kPodStorageId[] = "SNMP:EscapePod";
 void* contents_locker(const std::string& id) {
+    if (id == kPodStorageId) return shared_pod_storage();
     void* c=contents_constructable(id);WorldEvent check{};
     if(contents_build_type(c)!=interior_build::kLocker||!build_attached_capture(c,&check))return nullptr;
     return build_locker_storage(g_get_game_object.call(c,g_get_game_object.method),true);
 }
 void* contents_container(const std::string& id,bool* is_reactor=nullptr) {
     if(is_reactor)*is_reactor=false;
+    if(id==kPodStorageId)return contents_field(shared_pod_storage(),g_locker_api.container_field);
     const auto* build=build_synced_corridor(id.c_str());
     if(build&&build->state.tech_type==base_geometry::kBioreactorTech&&!build->removal_applied) {
         if(is_reactor)*is_reactor=true;
@@ -181,6 +184,10 @@ bool contents_reactor_id(void* reactor,std::string* id) {
 }
 bool contents_parent(void* container,std::string* id,bool* is_reactor=nullptr) {
     if(!container||il2cpp_object_get_class(reinterpret_cast<Il2CppObject*>(container))!=g_contents_api.items)return false;
+    if(container==contents_container(kPodStorageId)) {
+        *id=kPodStorageId;
+        return true;
+    }
     // Resolve the Transform property through its getter rather than treating an
     // ItemsContainer as a Unity Component.
     Entry<BuildObjectFn> tr;tr.bind(find_method(g_contents_api.items,"get_tr",0));
@@ -702,6 +709,12 @@ void tick_locker_contents(const LocalState& local) try {
         }
         g_contents_lockers.clear();g_contents_assembly.clear();g_contents_outgoing.clear();g_contents_incoming.clear();
         memcpy(g_contents_session,session,16);g_contents_epoch=epoch;g_contents_context=true;
+    }
+    // EscapePod.StorageOpen opens its PDA directly. Start reconciling the
+    // built-in locker before the first drag through the transfer hooks.
+    if(!g_local_is_host&&contents_container(kPodStorageId)) {
+        auto& pod=g_contents_lockers[kPodStorageId];
+        if(!pod.ready&&!pod.repairing&&!g_contents_pending.used)contents_query(kPodStorageId);
     }
     contents_poll_load();
     for(int i=0;i<4&&!g_contents_load.active&&!g_contents_incoming.empty();++i) {

@@ -112,7 +112,7 @@ int main() {
     Il2CppClass wrong;
     *reinterpret_cast<unsigned short*>(wrong.bytes+0x12a)=64;
     *slot(wrong,6)=reinterpret_cast<void*>(&original_enter);
-    assert(!seamoth_patch_slot(&wrong,&click_method,6,reinterpret_cast<void*>(&hooked_seamoth_hand_click),&original));
+    assert(!patch_managed_vtable_slot(&wrong,&click_method,6,reinterpret_cast<void*>(&hooked_seamoth_hand_click),&original));
     assert(!original&&writes==2); // unknown dispatch/layout is never overwritten
 
     // Live failure: the visible prefab has a different local GUID from the

@@ -10,6 +10,10 @@
 
 ![Subnautica Android Multiplayer](assets/subnautica_multiplayer_preview.gif)
 
+## Тестовая сборка
+
+[Скачать тестовую сборку со сталкерами и предметами](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-stalker-test). На обоих телефонах нужна эта же сборка с протоколом 41. Атаки сталкера на гостя и взаимодействия с предметами ещё проверяются. В установщике отображается версия 0.3.13-preview, сборка мода 9f8b2bda492a.
+
 ## Скачать и установить
 
 **[Скачать установщик 0.3.13 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-installer-preview/snmp-installer-preview.apk)** · [Страница релиза и контрольная сумма](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-preview)

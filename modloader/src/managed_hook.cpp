@@ -18,12 +18,20 @@
 #include "log.h"
 #include "launch_role_bridge.h"
 #include "net.h"
+#include "item_drop_sync.h"
+#include "shared_progress.h"
 #include "interior_build.h"
 #include "locker_contents.h"
 #include "managed_root.h"
 #include "runtime_load_guard.h"
 #include "avatar_update_frame.h"
+#include "avatar_locomotion.h"
+#include "avatar_motion.h"
+#include "seamoth_motion.h"
+#include "vehicle_occupancy.h"
+
 #include <deque>
+#include <set>
 #include <dirent.h>
 #include <unistd.h>
 #include <errno.h>
@@ -105,10 +113,13 @@ Entry<PredicateFn> g_is_swimming;
 Entry<PredicateFn> g_is_inside;
 Entry<PredicateFn> g_is_piloting;
 Entry<PredicateFn> g_is_underwater_for_swimming;
+Entry<float (*)(void*, void*)> g_get_water_level;
 // GameObject.AddComponent(Type), used to give a clone its own SkyApplier. Called through its
 // MethodInfo like every other method here: il2cpp_runtime_invoke takes the game down in this
 // build, so there is no boxing path available.
 Entry<AddComponentFn> g_add_component;
+Entry<void* (*)(void* object, void* type, bool include_inactive, void* method)>
+    g_get_components_in_children;
 // SkyApplier.RefreshDirtySky(), called after the renderers array is filled so the applier redoes
 // its work instead of waiting for the clone to move further than updateDistance from where it was
 // first applied.
@@ -160,17 +171,14 @@ bool read_player_transform(void* self, LocalState* out) {
     return true;
 }
 
-uint32_t read_player_flags(void* self) {
+uint32_t read_player_flags(void* self, float player_y) {
     if (!self) return 0;
 
     bool swimming = g_is_swimming && g_is_swimming.call(self, g_is_swimming.method);
     bool inside = g_is_inside && g_is_inside.call(self, g_is_inside.method);
     bool piloting = g_is_piloting && g_is_piloting.call(self, g_is_piloting.method);
-    // This is the exact predicate the game feeds into its own "is_underwater" Animator
-    // trigger (Player.UpdateIsUnderwaterForSwimming computes it from the water level), so
-    // sending it reproduces the real swim state instead of guessing from IsSwimming.
-    bool underwater = g_is_underwater_for_swimming &&
-                      g_is_underwater_for_swimming.call(self, g_is_underwater_for_swimming.method);
+    const bool underwater_for_swimming = g_is_underwater_for_swimming &&
+        g_is_underwater_for_swimming.call(self, g_is_underwater_for_swimming.method);
 
     uint32_t flags = 0;
     if (swimming) {
@@ -180,9 +188,10 @@ uint32_t read_player_flags(void* self) {
     }
     if (inside) flags |= kFlagInside;
     if (piloting) flags |= kFlagPiloting;
-    if (underwater) {
-        flags |= kFlagUnderwater;
-    } else if (!inside) {
+    if (underwater_for_swimming) flags |= kFlagUnderwater;
+    // A walking motor stays on land even if the player's head is near the waterline.
+    if (swimming && !inside && underwater_for_swimming && g_get_water_level &&
+        avatar_near_water_surface(player_y, g_get_water_level.call(self, g_get_water_level.method))) {
         flags |= kFlagOnSurface;
     }
     return flags;
@@ -205,23 +214,15 @@ struct RemoteAvatar {
     bool used;
     unsigned long last_update;
     void* animator;
+    AvatarMotion motion;
     Vector3 last_position;
-    unsigned long last_position_frame;
     bool has_last_position;
-    // Peer poses arrive at 20 Hz while this runs every frame, so a per-frame delta is zero
-    // on two frames out of three and spikes on the third. The travelled distance is therefore
-    // accumulated over a short window and divided by the elapsed time, which yields the real
-    // speed in units per second instead of zeros with 3x spikes in between.
+    // Average rendered movement for controllers missing the received speed parameters.
     Vector3 sample_position;
-    unsigned long sample_frame;
+    double speed_sample_at;
     float dist_accum;
     float speed;
     Vector3 velocity;
-    bool last_swim;
-    bool last_underwater;
-    bool last_surface;
-    bool underwater_mirrored;
-    bool underwater_mirror_init;
     bool cinematics_mirrored;
     bool cinematics_mirror_init;
     // What this mod wrote to the Animator on the previous frame, kept so the next frame can tell
@@ -240,6 +241,8 @@ struct RemoteAvatar {
     // TechType the prop currently corresponds to, held_retry the frame after which a failed
     // source lookup may run again.
     void* held_prop;
+    void* held_sky_applier;
+    unsigned long held_sky_apply_after;
     void* held_lights_parent;
     void* held_lights[8];
     bool held_light_enabled[8];
@@ -1357,7 +1360,12 @@ void* find_animator_in_hierarchy(void* game_object, int depth) {
 enum FieldTypeKind { kFieldTypeUnknown = 0, kFieldTypeString = 1, kFieldTypeInt32 = 2 };
 
 // AnimatorControllerParameterType, as stored in AnimatorControllerParameter.m_Type.
-enum AnimParamType { kAnimParamFloat = 1, kAnimParamBool = 2, kAnimParamInt = 3, kAnimParamTrigger = 4 };
+enum AnimParamType {
+    kAnimParamFloat = 1,
+    kAnimParamInt = 3,
+    kAnimParamBool = 4,
+    kAnimParamTrigger = 9,
+};
 
 struct FieldTypeInfo {
     const void* key;
@@ -1434,7 +1442,10 @@ bool read_anim_param(char* element, char* out_name, size_t name_capacity, int* o
             // m_DefaultInt is an Int32 too, so matching by type alone would end up reporting
             // the default value as the parameter type.
             int32_t value = *reinterpret_cast<int32_t*>(element + offset);
-            if (value >= kAnimParamFloat && value <= kAnimParamTrigger) *out_type = value;
+            if (value == kAnimParamFloat || value == kAnimParamInt ||
+                value == kAnimParamBool || value == kAnimParamTrigger) {
+                *out_type = value;
+            }
         }
     }
     return out_name[0] != '\0';
@@ -1514,16 +1525,8 @@ void discover_animator_params(void* animator) {
             g_float_param_count++;
         }
 
-        // Nearly every state parameter in this controller is a Trigger rather than a Bool,
-        // so the discovered type decides which setter is legal: calling SetBool on a Trigger
-        // is rejected by Unity and calling SetFloat on a Bool is a silent no-op. A candidate
-        // of the wanted type always wins over one that was only found by substring, and the
-        // exact-name matches are the ones the game itself drives, so they are preferred.
+        // The discovered parameter type determines which Animator setter to use.
         if (strcmp(lowered, "swimming_fast") == 0) {
-            snprintf(g_swim_param, sizeof(g_swim_param), "%s", param_name);
-            g_swim_param_type = param_type;
-            g_swim_param_id = i;
-        } else if (!g_swim_param[0] && strstr(lowered, "swim")) {
             snprintf(g_swim_param, sizeof(g_swim_param), "%s", param_name);
             g_swim_param_type = param_type;
             g_swim_param_id = i;
@@ -1566,7 +1569,7 @@ void discover_animator_params(void* animator) {
             g_turn_param_type = param_type;
             g_turn_param_id = i;
         }
-        // is_underwater / on_surface are the two triggers the game itself uses to pick the
+        // is_underwater / on_surface are the two switches the game itself uses to pick the
         // locomotion state, so they are matched exactly and never by substring.
         if (strcmp(lowered, "is_underwater") == 0) {
             snprintf(g_underwater_param, sizeof(g_underwater_param), "%s", param_name);
@@ -1578,8 +1581,6 @@ void discover_animator_params(void* animator) {
             g_surface_param_type = param_type;
             g_surface_param_id = i;
         }
-        // The second trigger the game keeps set on a live player, found by reading the local
-        // Animator rather than by guessing from the name.
         if (strcmp(lowered, "cinematics_enabled") == 0) {
             snprintf(g_cinematics_param, sizeof(g_cinematics_param), "%s", param_name);
             g_cinematics_param_type = param_type;
@@ -1663,8 +1664,7 @@ uint32_t read_using_tool_flag() {
     return out ? kFlagUsingTool : 0;
 }
 
-// Reads every discovered float and both state triggers off the local player's own Animator, so
-// the clone can be handed the same numbers instead of a reconstruction from guessed names.
+// Mirror the local Animator's floats and animation switches to the peer.
 void read_local_anim_state(LocalState* out) {
     if (!out || !g_local_animator || !g_anim_get_float || !g_anim_get_bool) return;
     int count = static_cast<int>(g_float_param_count);
@@ -1676,9 +1676,14 @@ void read_local_anim_state(LocalState* out) {
                                                            g_anim_get_float.method)
                                   : 0.0f;
     }
-    out->anim_underwater = 0;
+    out->anim_underwater = (out->flags & kFlagUnderwater) != 0;
     out->anim_cinematics = 0;
-    if (g_underwater_param_str) {
+    if ((out->flags & kFlagSwimming) && g_swim_param_type == kAnimParamBool &&
+        g_swim_param_str &&
+        g_anim_get_bool.call(g_local_animator, g_swim_param_str, g_anim_get_bool.method)) {
+        out->flags |= kFlagFastSwimming;
+    }
+    if (g_underwater_param_type == kAnimParamBool && g_underwater_param_str) {
         out->anim_underwater =
             g_anim_get_bool.call(g_local_animator, g_underwater_param_str, g_anim_get_bool.method)
                 ? 1
@@ -2067,6 +2072,7 @@ void clear_driven_vehicles();
 // Defined with spawn_held_prop; the spawn path caches the anchor, the frame loop follows it.
 void cache_avatar_hand(RemoteAvatar* avatar);
 void follow_avatar_held_prop(RemoteAvatar* avatar);
+void tick_held_prop_sky(RemoteAvatar* avatar);
 void apply_peer_held_rotation(RemoteAvatar* avatar,const PeerState& peer);
 void apply_peer_held_light(RemoteAvatar* avatar,const PeerState& peer);
 
@@ -2079,12 +2085,19 @@ void destroy_avatar(RemoteAvatar* avatar) {
     memset(avatar, 0, sizeof(*avatar));
 }
 
-// Drives the clone's Animator from the remote state: the swim flag is applied through
-// whichever setter the discovered parameter type actually allows, the position delta feeds
-// the speed parameter, and the peer's head orientation feeds view_pitch/view_turn. Only
-// parameters discovered by name in discover_animator_params are ever touched.
+void drive_locomotion_switch(void* animator, void* parameter, int type, bool active) {
+    if (!parameter) return;
+    if (type == kAnimParamBool && g_anim_set_bool) {
+        g_anim_set_bool.call(animator, parameter, active, g_anim_set_bool.method);
+    } else if (type == kAnimParamTrigger) {
+        const auto& setter = active ? g_anim_set_trigger : g_anim_reset_trigger;
+        if (setter) setter.call(animator, parameter, setter.method);
+    }
+}
+
+// Drive the clone from the peer's locomotion, motion and look state.
 void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
-                           const Vector3& position) {
+                           const AvatarPose& pose, const Vector3& position, double now) {
     if (!avatar->animator) return;
 
     // Detects a component that writes to the clone's Animator after this function does.
@@ -2124,17 +2137,12 @@ void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
         }
     }
 
-    // Peer poses arrive at 20 Hz while this runs every frame, so a per-frame delta is zero on
-    // two frames out of three and spikes on the third. Measuring that delta directly made
-    // move_speed read 0.00 almost always and 20+ on the odd frame, which is why the swim cycle
-    // never played even though the peer was moving: the Animator saw a stationary diver with
-    // the occasional teleport. Accumulating distance over ~0.25 s and dividing by the real
-    // elapsed time gives a stable value in units per second.
-    constexpr unsigned long kSpeedSampleFrames = 15;
+    constexpr double kSpeedSampleSeconds = 0.25;
     if (!avatar->has_last_position) {
         avatar->has_last_position = true;
         avatar->sample_position = position;
-        avatar->sample_frame = g_avatar_frame;
+        avatar->last_position = position;
+        avatar->speed_sample_at = now;
         avatar->dist_accum = 0.0f;
         avatar->speed = 0.0f;
         avatar->velocity = Vector3{0.0f, 0.0f, 0.0f};
@@ -2144,106 +2152,38 @@ void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
     float dz = position.z - avatar->last_position.z;
     avatar->dist_accum += sqrtf(dx * dx + dy * dy + dz * dz);
     avatar->last_position = position;
-    avatar->last_position_frame = g_avatar_frame;
 
-    unsigned long elapsed = g_avatar_frame - avatar->sample_frame;
-    if (elapsed >= kSpeedSampleFrames) {
-        float dt = static_cast<float>(elapsed) / 60.0f;
+    const double elapsed = now - avatar->speed_sample_at;
+    if (elapsed >= kSpeedSampleSeconds) {
+        const float dt = static_cast<float>(elapsed);
         avatar->speed = avatar->dist_accum / dt;
         avatar->velocity = Vector3{(position.x - avatar->sample_position.x) / dt,
                                    (position.y - avatar->sample_position.y) / dt,
                                    (position.z - avatar->sample_position.z) / dt};
         avatar->sample_position = position;
-        avatar->sample_frame = g_avatar_frame;
+        avatar->speed_sample_at = now;
         avatar->dist_accum = 0.0f;
     }
     float speed = avatar->speed;
 
-    // view_turn is body-relative: the clone's root already carries peer.yaw, so what is left
+    // view_turn is body-relative: the clone's root already carries the rendered yaw, so what is left
     // for the head is how far the peer is looking away from their own body.
     //
     // The model's euler.y and camAnchor's yaw use opposite conventions, so view_yaw - yaw is
     // pinned at exactly -180 (or +180) instead of describing the head. Sending that raw value
     // asks the Animator to point the head backwards, and the local player's own view_turn is
     // 0.000 while their head points straight ahead - which is what the offset below restores.
-    float turn = peer.view_yaw - peer.yaw + 180.0f;
-    while (turn > 180.0f) turn -= 360.0f;
-    while (turn < -180.0f) turn += 360.0f;
-    float pitch = peer.pitch;
-    if (pitch > 80.0f) pitch = 80.0f;
-    if (pitch < -80.0f) pitch = -80.0f;
+    const float turn = std::remainder(std::remainder(pose.view_yaw, 360.0f) -
+                                      std::remainder(pose.yaw, 360.0f) + 180.0f, 360.0f);
+    const float pitch = std::clamp(std::remainder(pose.pitch, 360.0f), -80.0f, 80.0f);
 
-    bool swimming = (peer.flags & kFlagSwimming) != 0;
-    if (swimming != avatar->last_swim) {
-        if (g_swim_param_type == kAnimParamBool && g_anim_set_bool && g_swim_param_str) {
-            g_anim_set_bool.call(avatar->animator, g_swim_param_str, swimming,
-                                 g_anim_set_bool.method);
-        } else if (g_swim_param_type == kAnimParamTrigger) {
-            // A trigger is a one-shot transition, not a state: it is set on the rising edge
-            // and has to be reset explicitly when swimming ends, otherwise the animator keeps
-            // replaying the transition on every re-entry.
-            if (swimming && g_anim_set_trigger && g_swim_param_str) {
-                g_anim_set_trigger.call(avatar->animator, g_swim_param_str,
-                                        g_anim_set_trigger.method);
-            } else if (!swimming && g_anim_reset_trigger && g_swim_param_str) {
-                g_anim_reset_trigger.call(avatar->animator, g_swim_param_str,
-                                          g_anim_reset_trigger.method);
-            }
-        }
-        avatar->last_swim = swimming;
-    }
-
-    // is_underwater / on_surface are what actually select the swim animation. A trigger is
-    // consumed by the state machine, so it is re-armed every frame while the condition holds
-    // and only reset on the falling edge, which keeps the state stable without a rising-edge
-    // gate that could miss a transition after the Animator has moved on by itself.
-    bool underwater = (peer.flags & kFlagUnderwater) != 0;
-    if (underwater) {
-        if (g_underwater_param_type == kAnimParamTrigger && g_anim_set_trigger &&
-            g_underwater_param_str) {
-            g_anim_set_trigger.call(avatar->animator, g_underwater_param_str,
-                                    g_anim_set_trigger.method);
-        } else if (g_underwater_param_type == kAnimParamBool && g_anim_set_bool &&
-                   g_underwater_param_str) {
-            g_anim_set_bool.call(avatar->animator, g_underwater_param_str, true,
-                                 g_anim_set_bool.method);
-        }
-    } else if (!avatar->last_underwater) {
-        if (g_underwater_param_type == kAnimParamTrigger && g_anim_reset_trigger &&
-            g_underwater_param_str) {
-            g_anim_reset_trigger.call(avatar->animator, g_underwater_param_str,
-                                      g_anim_reset_trigger.method);
-        } else if (g_underwater_param_type == kAnimParamBool && g_anim_set_bool &&
-                   g_underwater_param_str) {
-            g_anim_set_bool.call(avatar->animator, g_underwater_param_str, false,
-                                 g_anim_set_bool.method);
-        }
-    }
-    avatar->last_underwater = underwater;
-
-    bool on_surface = (peer.flags & kFlagOnSurface) != 0;
-    if (on_surface) {
-        if (g_surface_param_type == kAnimParamTrigger && g_anim_set_trigger &&
-            g_surface_param_str) {
-            g_anim_set_trigger.call(avatar->animator, g_surface_param_str,
-                                    g_anim_set_trigger.method);
-        } else if (g_surface_param_type == kAnimParamBool && g_anim_set_bool &&
-                   g_surface_param_str) {
-            g_anim_set_bool.call(avatar->animator, g_surface_param_str, true,
-                                 g_anim_set_bool.method);
-        }
-    } else if (!avatar->last_surface) {
-        if (g_surface_param_type == kAnimParamTrigger && g_anim_reset_trigger &&
-            g_surface_param_str) {
-            g_anim_reset_trigger.call(avatar->animator, g_surface_param_str,
-                                      g_anim_reset_trigger.method);
-        } else if (g_surface_param_type == kAnimParamBool && g_anim_set_bool &&
-                   g_surface_param_str) {
-            g_anim_set_bool.call(avatar->animator, g_surface_param_str, false,
-                                 g_anim_set_bool.method);
-        }
-    }
-    avatar->last_surface = on_surface;
+    const AvatarLocomotion locomotion = read_peer_locomotion(peer);
+    drive_locomotion_switch(avatar->animator, g_swim_param_str, g_swim_param_type,
+                            locomotion.fast_swim);
+    drive_locomotion_switch(avatar->animator, g_underwater_param_str, g_underwater_param_type,
+                            locomotion.underwater);
+    drive_locomotion_switch(avatar->animator, g_surface_param_str, g_surface_param_type,
+                            locomotion.on_surface);
 
     // Tool-in-use moment: the peer plays the swing/scan, not just the hold. Set unconditionally
     // every frame - it is transient, and edge tracking could miss a use that fits between two
@@ -2306,15 +2246,7 @@ void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
                               g_anim_set_float.method);
     }
 
-    // The peer's Animator values are applied verbatim, in the order the controller lists them.
-    //
-    // Everything before this reconstructed the pose from three parameter names picked because
-    // they read like "look angle", and the read-back proved the writes landed while the pose
-    // never changed. Reading the local Animator showed why the guess could not work: the
-    // controller aims the upper body with chestAim_lean and chestAim_twist, which were never
-    // written at all, and it has no swimming_fast trigger to set. Sending all thirteen floats and
-    // both state triggers makes the clone's Animator numerically identical to the peer's, so the
-    // controller produces the same pose without this code having to know what any name means.
+    // Apply the peer's Animator floats in the controller's parameter order.
     int mirror_count = peer.anim_float_count;
     if (mirror_count > static_cast<int>(g_float_param_count)) {
         mirror_count = static_cast<int>(g_float_param_count);
@@ -2339,28 +2271,6 @@ void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
     }
     avatar->written_valid = true;
 
-    // Triggers fire on the transition, so they are set only when the peer's state actually
-    // changes. Re-setting one every frame restarts the transition each frame.
-    bool peer_underwater = peer.anim_underwater != 0;
-    if (!avatar->underwater_mirror_init || peer_underwater != avatar->underwater_mirrored) {
-        avatar->underwater_mirror_init = true;
-        if (g_underwater_param_type == kAnimParamTrigger) {
-            if (peer_underwater) {
-                if (g_anim_set_trigger && g_underwater_param_str) {
-                    g_anim_set_trigger.call(avatar->animator, g_underwater_param_str,
-                                            g_anim_set_trigger.method);
-                }
-            } else if (g_anim_reset_trigger && g_underwater_param_str) {
-                g_anim_reset_trigger.call(avatar->animator, g_underwater_param_str,
-                                          g_anim_reset_trigger.method);
-            }
-        } else if (g_anim_set_bool && g_underwater_param_str) {
-            g_anim_set_bool.call(avatar->animator, g_underwater_param_str, peer_underwater,
-                                 g_anim_set_bool.method);
-        }
-        avatar->underwater_mirrored = peer_underwater;
-    }
-
     bool peer_cinematics = peer.anim_cinematics != 0;
     if (!avatar->cinematics_mirror_init || peer_cinematics != avatar->cinematics_mirrored) {
         avatar->cinematics_mirror_init = true;
@@ -2383,9 +2293,10 @@ void drive_avatar_animator(RemoteAvatar* avatar, const PeerState& peer,
 
     if ((g_avatar_frame % 120) == 0) {
         LOG_INFO("anim drive: bodyYaw=%.1f viewYaw=%.1f pitch=%.1f speed=%.2f turn=%.1f "
-                 "swim=%d underwater=%d onSurface=%d vel=%.2f/%.2f/%.2f",
-                 peer.yaw, peer.view_yaw, pitch, speed, turn, swimming ? 1 : 0,
-                 underwater ? 1 : 0, on_surface ? 1 : 0, avatar->velocity.x,
+                 "swim=%d underwater=%d onSurface=%d fastSwim=%d vel=%.2f/%.2f/%.2f",
+                 pose.yaw, pose.view_yaw, pitch, speed, turn,
+                 (peer.flags & kFlagSwimming) != 0, locomotion.underwater,
+                 locomotion.on_surface, locomotion.fast_swim, avatar->velocity.x,
                  avatar->velocity.y, avatar->velocity.z);
     }
 
@@ -2941,10 +2852,6 @@ void spawn_avatar(const PeerState& peer) {
         g_avatars[i].last_update = g_avatar_frame;
         g_avatars[i].animator = find_animator_in_hierarchy(go, 0);
         g_avatars[i].has_last_position = false;
-        g_avatars[i].last_swim = false;
-        g_avatars[i].last_underwater = false;
-        g_avatars[i].last_surface = false;
-        g_avatars[i].sample_frame = g_avatar_frame;
         g_avatars[i].dist_accum = 0.0f;
         g_avatars[i].speed = 0.0f;
         g_avatars[i].velocity = Vector3{0.0f, 0.0f, 0.0f};
@@ -3069,12 +2976,14 @@ void update_peer_avatars_inner(void* player_self) {
     g_avatar_update_stage = "peer-list";
     PeerState peers[kMaxPeers];
     size_t count = net_copy_peers(peers, kMaxPeers);
+    const double now = monotonic_seconds();
 
     for (size_t i = 0; i < count; i++) {
         const PeerState& peer = peers[i];
         // Discovery/HELLO is not a usable player pose. A loading guest publishes
         // no state until the local world guard is ready.
-        if(!peer.seq_valid)continue;
+        const AvatarPose received_pose{peer.x, peer.y, peer.z, peer.yaw, peer.view_yaw, peer.pitch};
+        if (!peer.seq_valid || !received_pose.valid()) continue;
         g_avatar_update_peer = peer.id;
         g_avatar_update_stage = "spawn";
         RemoteAvatar* avatar = find_avatar(peer.id);
@@ -3092,9 +3001,11 @@ void update_peer_avatars_inner(void* player_self) {
         // Move the body before optional equipment/tool work. A visual component
         // failure must not prevent the next received position from being used.
         g_avatar_update_stage = "root-pose";
-        Vector3 position{peer.x, peer.y, peer.z};
+        if (avatar->motion.retarget(peer, received_pose, now)) avatar->has_last_position = false;
+        const AvatarPose pose = avatar->motion.sample(now);
+        const Vector3 position{pose.x, pose.y, pose.z};
         g_set_position.call(avatar->transform, position, g_set_position.method);
-        Vector3 euler{0.0f, peer.yaw, 0.0f};
+        Vector3 euler{0.0f, pose.yaw, 0.0f};
         g_set_euler.call(avatar->transform, euler, g_set_euler.method);
         avatar->last_update = g_avatar_frame;
 
@@ -3129,7 +3040,7 @@ void update_peer_avatars_inner(void* player_self) {
         if (driving) continue;
 
         g_avatar_update_stage = "animation";
-        drive_avatar_animator(avatar, peer, position);
+        drive_avatar_animator(avatar, peer, pose, position, now);
         // The peer's held item as a prop on this clone, after the animator so a freshly spawned
         // prop lands on the pose it was created in. The follow re-glues it every frame after.
         g_avatar_update_stage = "held-item";
@@ -3139,6 +3050,7 @@ void update_peer_avatars_inner(void* player_self) {
         g_avatar_update_stage = "held-rotation";
         apply_peer_held_rotation(avatar,peer);
         g_avatar_update_stage = "held-light";
+        tick_held_prop_sky(avatar);
         apply_peer_held_light(avatar,peer);
     }
 
@@ -3322,6 +3234,8 @@ void resolve_avatar_api() {
         // call; only the wrapper is wanted here, since the internal one is a free function that
         // expects a different argument layout.
         g_add_component.bind(find_method_typed(game_object, "AddComponent", 1, "system.type"));
+        g_get_components_in_children.bind(
+            find_method_typed(game_object, "GetComponentsInChildren", 2, "system.type"));
         struct Il2CppClass* renderer_class = find_class_in_domain("UnityEngine", "Renderer");
         if (renderer_class && il2cpp_class_get_type && il2cpp_type_get_object) {
             g_renderer_type_obj = il2cpp_type_get_object(il2cpp_class_get_type(renderer_class));
@@ -3437,6 +3351,7 @@ PickupFn g_pickup_original = nullptr;
 DropFn g_drop_original = nullptr;
 
 Entry<GetStringFn> g_unique_get_id;
+Entry<bool (*)(void* id, void** result, void* method)> g_unique_try_get;
 Entry<GetStringFn> g_unique_get_class_id;
 Entry<GetPropBoolFn> g_pickup_get_attached;
 Entry<SetInstanceBoolFn> g_player_drop_held_item;
@@ -3500,11 +3415,15 @@ Entry<SetPropBoolFn> g_pickup_set_visible;
 // setters are what a held-item prop needs on the receiving side: reparent onto the avatar's
 // hand, stop its physics from fighting the parenting.
 Entry<GetAnimObjectFn> g_inventory_get_held;
+Entry<GetAnimObjectFn> g_inventory_get_container;
+void* g_pickup_inventory_item_field = nullptr;
+
+void* g_inventory_item_owner_field = nullptr;
 Entry<GetTechTypeFn> g_pickup_get_tech;
-// Vehicle sync: Player.GetVehicle hands the piloted Seamoth/Prawn (null on foot, or in a
-// Cyclops chair which this pass skips). get_isKinematic reads the rigidbody flag the remote
-// drive parks and restores.
+// Player.GetVehicle covers Seamoth/Prawn. Piloting the Cyclops uses Player.GetCurrentSub.
 Entry<GetAnimObjectFn> g_player_get_vehicle;
+Entry<GetAnimObjectFn> g_player_get_current_sub;
+void* g_subroot_is_cyclops = nullptr;
 Entry<GetPropBoolFn> g_rb_get_kinematic;
 // Equipment sync (item sync v3): Inventory.get_equipment gives the Equipment instance,
 // GetTechTypeInSlot reads one worn slot. Slot names are cached managed strings.
@@ -3604,23 +3523,25 @@ void guid_from_string(const char* text, uint8_t out[16]) {
     }
 }
 
-// Reads UniqueIdentifier.Id off a Pickupable. Returns false when the object has none, which
-// happens for anything spawned without a guid and cannot be addressed by the other phones.
-bool pickup_guid(void* pickupable, uint8_t out[16]) {
-    if (!pickupable || !g_unique_get_id || !g_get_component || !g_unique_identifier_type) {
-        return false;
+void* pickup_identifier(void* pickupable) {
+    if (!pickupable || !g_get_game_object || !g_get_component || !g_unique_identifier_type) {
+        return nullptr;
     }
     void* game_object = g_get_game_object.call(pickupable, g_get_game_object.method);
-    if (!game_object) return false;
+    return game_object ? g_get_component.call(game_object, g_unique_identifier_type,
+                                               g_get_component.method) : nullptr;
+}
 
-    void* identifier = g_get_component.call(game_object, g_unique_identifier_type,
-                                            g_get_component.method);
-    if (!identifier) return false;
+bool pickup_id(void* pickupable, char* out, size_t capacity) {
+    void* uid = pickup_identifier(pickupable);
+    return uid && g_unique_get_id &&
+           string_to_ascii(g_unique_get_id.call(uid, g_unique_get_id.method), out, capacity);
+}
 
-    void* text = g_unique_get_id.call(identifier, g_unique_get_id.method);
-    char ascii[128];
-    if (!string_to_ascii(text, ascii, sizeof(ascii))) return false;
-    guid_from_string(ascii, out);
+bool pickup_guid(void* pickupable, uint8_t out[16]) {
+    char id[kWorldEventObjectIdSize];
+    if (!pickup_id(pickupable, id, sizeof(id))) return false;
+    guid_from_string(id, out);
     return true;
 }
 
@@ -3680,20 +3601,85 @@ bool g_host_capture_pending = false;
 // not carried, because which inventory holds it is a separate question. Blowntobytes solves it
 // with a full inventory mirror; here the honest first step is that a picked-up item disappears
 // for everyone else and reappears where it was dropped.
-// true - the event was applied or can never be applied (permanent refusal, missing API).
-// false - the named object is not in memory yet; the caller keeps the event and retries while
-// its chunk streams in, which is the one failure the transport cannot fix for us: it acks on
-// receipt, so delivery is guaranteed but the scene may simply not contain the object yet.
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
 void fish_pickup_on_drop(void* pickup);
 #endif
-bool apply_remote_event(const WorldEvent& event) {
+void* find_prefab_source(uint32_t tech);
+bool world_operations_ready();
+bool prefab_retain(ManagedRoot& root, void* object);
+void observe_remote_resource_drop(void* pickup, const uint8_t guid[16]);
+
+// Try the prefab path when the native scan could not find the original.
+bool spawn_missing_resource(const WorldEvent& event, const LocalState& local, void** result) {
+    if (!item_drop_sync::valid_spawn(event) || !g_unique_try_get || !g_uid_set_id ||
+        !g_pickup_get_tech || !g_pickupable_type || !g_pickup_drop_at || !g_get_component ||
+        !g_instantiate || !g_object_destroy || !il2cpp_string_new) return false;
+    uint8_t expected_guid[16];
+    guid_from_string(event.object_id, expected_guid);
+    if (memcmp(expected_guid, event.guid, sizeof(expected_guid)) != 0) return false;
+    if (!local.valid || !item_drop_sync::near_drop(event, local.x, local.y, local.z)) return false;
+
+    // The existing object always wins. Also check the native registry in case
+    // the Id belongs to an object that the Pickupable sweep did not see.
+    void* prefab = find_prefab_source(event.tech_type);
+    if (!prefab) return false;
+    ManagedRoot id;
+    void* registered = nullptr;
+    if (!prefab_retain(id, il2cpp_string_new(event.object_id)) ||
+        g_unique_try_get.call(id.get(), &registered, g_unique_try_get.method)) return false;
+
+    void* source = g_get_component.call(prefab, g_pickupable_type, g_get_component.method);
+    if (!source || g_pickup_get_tech.call(source, g_pickup_get_tech.method) !=
+                       static_cast<uint32_t>(event.tech_type)) return false;
+    Vector3 position{event.x, event.y, event.z};
+    Quaternion rotation{event.qx, event.qy, event.qz, event.qw};
+    void* go = g_instantiate.call(prefab, position, rotation, g_instantiate.method);
+    if (!go) return false;
+    void* pickupable = g_get_component.call(go, g_pickupable_type, g_get_component.method);
+    void* uid = pickup_identifier(pickupable);
+    if (uid) {
+        g_uid_set_id.call(uid, id.get(), g_uid_set_id.method);
+        char assigned[kWorldEventObjectIdSize];
+        if (pickup_id(pickupable, assigned, sizeof(assigned)) &&
+            strcmp(assigned, event.object_id) == 0) {
+            *result = pickupable;
+            LOG_INFO("event: drop %u created resource tech=%d", event.sequence, event.tech_type);
+            return true;
+        }
+    }
+    g_object_destroy.call(go, g_object_destroy.method);
+    return false;
+}
+
+bool apply_remote_event(const WorldEvent& event, const LocalState& local) {
     if (!g_pickup_set_visible || !g_set_position) {
         LOG_WARN("event: SetVisible/set_position unavailable, remote events ignored");
         return true;
     }
-    void* pickupable = find_pickupable_by_guid(event.guid);
-    if (!pickupable) return false;
+    if (!world_operations_ready()) return false;
+    void* pickupable = nullptr;
+    if (item_drop_sync::has_resource_identity(event) && g_unique_try_get &&
+        g_get_component && !g_get_component_is_string && g_pickupable_type &&
+        g_pickup_get_tech && g_get_game_object && il2cpp_string_new) {
+        uint8_t expected[16];
+        guid_from_string(event.object_id, expected);
+        if (memcmp(expected, event.guid, sizeof(expected))) return true;
+        ManagedRoot id;
+        if (!prefab_retain(id, il2cpp_string_new(event.object_id))) return false;
+        void* registered = nullptr;
+        if (g_unique_try_get.call(id.get(), &registered, g_unique_try_get.method) && registered) {
+            void* go = g_get_game_object.call(registered, g_get_game_object.method);
+            pickupable = go ? g_get_component.call(go, g_pickupable_type, g_get_component.method) : nullptr;
+            if (!pickupable || g_pickup_get_tech.call(pickupable, g_pickup_get_tech.method) !=
+                                   static_cast<uint32_t>(event.tech_type)) {
+                LOG_WARN("event: resource %u identity belongs to a different object", event.sequence);
+                return true;
+            }
+        }
+    } else {
+        pickupable = find_pickupable_by_guid(event.guid);
+    }
+    if (!pickupable && !spawn_missing_resource(event, local, &pickupable)) return false;
     void* game_object = g_get_game_object.call(pickupable, g_get_game_object.method);
     if (!game_object) return false;
 
@@ -3750,6 +3736,9 @@ bool apply_remote_event(const WorldEvent& event) {
         Vector3 position{event.x, event.y, event.z};
         Vector3 push{event.vx, event.vy, event.vz};
         g_pickup_drop_at.call(pickupable, position, push, false, g_pickup_drop_at.method);
+        if (item_drop_sync::valid_spawn(event)) {
+            observe_remote_resource_drop(pickupable, event.guid);
+        }
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         fish_pickup_on_drop(pickupable);
 #endif
@@ -3995,6 +3984,7 @@ bool contents_locker_busy(const char* id);
 #endif
 #include "build_sync.inc"
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
+#include "shared_progress.inc"
 #include "locker_contents_sync.inc"
 void reset_boomerang_sync();
 #include "creature_probe.inc"
@@ -4003,6 +3993,7 @@ bool fish_pickup_suppressed(const creature_motion::Message& identity);
 bool fish_pickup_pose_allowed(const creature_motion::Message& pose);
 extern bool g_reid_wanted;
 #include "boomerang_sync.inc"
+#include "stalker_attack_sync.inc"
 #include "fish_pickup_sync.inc"
 #include "player_marker.inc"
 #endif
@@ -4010,7 +4001,7 @@ extern bool g_reid_wanted;
 
 // Runs on the game thread from Player.Update. The pump only queues; everything that touches
 // Pickupable has to happen here.
-void pump_remote_events() {
+void pump_remote_events(const LocalState& local) {
     WorldEvent events[8];
     size_t count = net_copy_world_events(events, 8);
     double now = monotonic_seconds();
@@ -4019,6 +4010,7 @@ void pump_remote_events() {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         if(events[i].kind==kWorldEventLockerContents){contents_receive_frame(events[i]);continue;}
         if(events[i].kind==kWorldEventFishPickup){fish_pickup_receive_frame(events[i]);continue;}
+        if(events[i].kind==kWorldEventSharedProgress){shared_progress_receive(events[i]);continue;}
 #endif
         // Build kinds carry a full snapshot; the job table on the game thread owns the
         // apply, so they are queued straight away instead of going through pickup/drop
@@ -4034,16 +4026,13 @@ void pump_remote_events() {
             build_handle_remove(events[i]);
             continue;
         }
-        if (apply_remote_event(events[i])) continue;
-        bool queued = false;
-        for (const PendingEvent& slot : g_pending_events) {
-            if (slot.used && slot.ev.kind == events[i].kind &&
-                memcmp(slot.ev.guid, events[i].guid, 16) == 0) {
-                queued = true;
-                break;
+        for (PendingEvent& slot : g_pending_events) {
+            if (slot.used && item_drop_sync::supersedes(events[i], slot.ev)) {
+                slot.used = false;
             }
         }
-        if (queued) continue;
+        if (apply_remote_event(events[i], local)) continue;
+        bool queued = false;
         for (PendingEvent& slot : g_pending_events) {
             if (slot.used) continue;
             slot.used = true;
@@ -4073,7 +4062,7 @@ void pump_remote_events() {
         }
         if (now < slot.next_try) continue;
         slot.next_try = now + kEventRetryInterval;
-        if (apply_remote_event(slot.ev)) {
+        if (apply_remote_event(slot.ev, local)) {
             LOG_INFO("event: %s %u applied after retry",
                      slot.ev.kind == kWorldEventPickup ? "pickup" : "drop", slot.ev.sequence);
             slot.used = false;
@@ -4130,9 +4119,11 @@ struct ItemMark {
     float z;
     Quaternion rotation;
     Vector3 velocity;
+    int32_t resource_tech;
+    char object_id[kWorldEventObjectIdSize];
     bool active;
-    // True when the object sits anywhere under Inventory.main at the time of the sweep. Only
-    // meaningful for active marks: an active item inside the inventory is the equipped viewmodel
+    // True when the object sits anywhere under Inventory.main at the time of the sweep.
+    // An active item inside the inventory is the equipped viewmodel
     // riding the camera, an active item outside it is a real object in the world. This is what
     // tells the real transitions apart from the phantom ones - equipping a tool makes it go
     // inactive->active (looks like a drop) and putting it away makes it go active->inactive
@@ -4141,6 +4132,7 @@ struct ItemMark {
     // The live GameObject behind this mark. Valid only for the sweep that produced it; the
     // copies parked in g_items_seen may outlive the object and are never dereferenced there.
     void* live_go;
+    void* live_pickup;
 };
 
 ItemMark g_items_seen[kItemScanLimit];
@@ -4153,6 +4145,8 @@ int g_item_scan_divider = 0;
 constexpr int kItemMeasureTick = 10;
 int g_item_measure_divider = 0;
 bool g_item_scan_ready = false;
+
+bool g_guest_inventory_identity_ready = false;
 unsigned long g_item_frame = 0;
 Vector3 g_item_origin{};
 
@@ -4196,16 +4190,33 @@ bool within_reach(const ItemMark& mark) {
 // Reads the guid, the world pose, the throw velocity and the active flag of one Pickupable.
 // Returns false for anything without a UniqueIdentifier, which cannot be addressed by the other
 // phone anyway.
-bool read_item_mark(void* pickupable, ItemMark* out) {
-    if (!pickup_guid(pickupable, out->guid)) return false;
+bool read_item_mark(void* pickupable, void* inventory_container, ItemMark* out) {
+    if (!pickup_id(pickupable, out->object_id, sizeof(out->object_id)) || !out->object_id[0]) return false;
+    guid_from_string(out->object_id, out->guid);
     if (!g_get_game_object || !g_go_get_active_self) return false;
     void* game_object = g_get_game_object.call(pickupable, g_get_game_object.method);
     if (!game_object) return false;
     out->live_go = game_object;
+    out->live_pickup = pickupable;
+    if (g_pickup_get_tech) {
+        const int32_t tech = g_pickup_get_tech.call(pickupable, g_pickup_get_tech.method);
+        if (item_drop_sync::plain_resource(tech)) out->resource_tech = tech;
+    }
     out->active = g_go_get_active_self.call(game_object, g_go_get_active_self.method);
-    // The parent walk only runs for active objects, which are few: inactive items sit in
-    // backpacks and lockers by the dozen, and their flag is never read by the transition logic.
-    out->in_inventory = out->active && object_in_local_inventory(game_object);
+    if (inventory_container && g_pickup_inventory_item_field && g_inventory_item_owner_field) {
+        void* inventory_item = nullptr;
+        il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(pickupable),
+                               g_pickup_inventory_item_field, &inventory_item);
+        void* owner = nullptr;
+        if (inventory_item) {
+            il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(inventory_item),
+                                   g_inventory_item_owner_field, &owner);
+        }
+        out->in_inventory = owner == inventory_container;
+    }
+    if (out->active && !out->in_inventory) {
+        out->in_inventory = object_in_local_inventory(game_object);
+    }
 
     Vector3 position{};
     pickup_pose(pickupable, &position, &out->rotation);
@@ -4225,6 +4236,25 @@ bool read_item_mark(void* pickupable, ItemMark* out) {
         }
     }
     return true;
+}
+
+void observe_remote_resource_drop(void* pickup, const uint8_t guid[16]) {
+    // Record the remote drop now so the next sweep can report a real pickup
+    // even if the player grabs the resource before that sweep.
+    if (!g_item_scan_ready) return;
+    ItemMark dropped{};
+    if (!read_item_mark(pickup, nullptr, &dropped) || !dropped.active ||
+        dropped.in_inventory || !mark_matches(dropped, guid)) return;
+    size_t index = 0;
+    for (; index < g_items_seen_count; index++) {
+        if (mark_matches(g_items_seen[index], guid)) break;
+    }
+    if (index == kItemScanLimit) return;
+    if (index == g_items_seen_count) ++g_items_seen_count;
+    g_items_seen[index] = dropped;
+    for (ItemSuppress& slot : g_item_suppressed) {
+        if (memcmp(slot.guid, guid, sizeof(slot.guid)) == 0) slot.until = 0;
+    }
 }
 
 // Periodic breadcrumb for the item scan, at most every kItemLogInterval seconds. It used to also
@@ -4394,10 +4424,10 @@ void* fresh_pinned_id(const char* prefix, unsigned long index) {
     return value;
 }
 
-void send_item_event(const ItemMark& mark, uint8_t kind) {
+void send_item_event(const ItemMark& mark, uint8_t kind, bool allow_prefab_spawn = false) {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
     if (kind == kWorldEventDrop) {
-        if (void* pickup = find_pickupable_by_guid(mark.guid)) fish_pickup_on_drop(pickup);
+        fish_pickup_on_drop(mark.live_pickup);
     }
 #endif
     WorldEvent event{};
@@ -4413,6 +4443,11 @@ void send_item_event(const ItemMark& mark, uint8_t kind) {
     event.vx = mark.velocity.x;
     event.vy = mark.velocity.y;
     event.vz = mark.velocity.z;
+    // Preserve the exact identity even if the observed pickup has already been unloaded.
+    if (mark.resource_tech && (kind == kWorldEventPickup || allow_prefab_spawn)) {
+        event.tech_type = mark.resource_tech;
+        memcpy(event.object_id, mark.object_id, sizeof(event.object_id));
+    }
     // already_applied is true: this phone's own game just made the change, so it must not act
     // on the event when it comes back from a peer.
     net_post_world_event(event, true);
@@ -4432,49 +4467,48 @@ void scan_items(bool emit) {
     void* list = g_find_objects_all.call(g_pickupable_type, true, g_find_objects_all.method);
     if (!list) return;
 
+
     ItemMark now[kItemScanLimit];
     size_t now_count = 0;
     int32_t count = g_array_get_length.call(list, g_array_get_length.method);
     if (count > static_cast<int32_t>(kItemScanLimit)) count = static_cast<int32_t>(kItemScanLimit);
+    void* inventory = read_static_object_field(g_inventory_class, "main");
+    void* container = inventory && g_inventory_get_container
+        ? g_inventory_get_container.call(inventory, g_inventory_get_container.method) : nullptr;
 
     for (int32_t i = 0; i < count; i++) {
         void* item = g_array_get_value.call(list, i, g_array_get_value.method);
         ItemMark mark{};
-        if (!read_item_mark(item, &mark)) continue;
+        if (!read_item_mark(item, container, &mark)) continue;
         now[now_count++] = mark;
     }
 
     if (emit && g_item_scan_ready) {
         for (size_t i = 0; i < now_count; i++) {
-            if (!now[i].active) continue;
-            // Was it there before, and was it inactive then? Then this is a drop.
-            bool known_inactive = false;
+            if (!now[i].active || now[i].in_inventory) continue;
+            const ItemMark* previous = nullptr;
             for (size_t j = 0; j < g_items_seen_count; j++) {
                 if (!mark_matches(g_items_seen[j], now[i].guid)) continue;
-                known_inactive = !g_items_seen[j].active;
+                previous = &g_items_seen[j];
                 break;
             }
-            if (!known_inactive) continue;
-            // Equipping a quickslot item also flips it from inactive to active - the viewmodel
-            // comes alive at the camera - and without this guard every equip was broadcast as a
-            // drop: the other phone spawned a copy of the item in the world wherever the holder
-            // was standing. A drop is only a drop when the object ended up outside the inventory.
-            if (now[i].in_inventory) continue;
+            if (!previous || (previous->active && !previous->in_inventory)) continue;
             if (!within_reach(now[i]) || item_is_suppressed(now[i].guid)) continue;
             LOG_INFO("event: local drop detected");
-            send_item_event(now[i], kWorldEventDrop);
+            send_item_event(now[i], kWorldEventDrop, previous->in_inventory);
         }
         for (size_t j = 0; j < g_items_seen_count; j++) {
             if (!g_items_seen[j].active) continue;
-            // Still around and still active? Then nothing happened to it.
-            bool still_active = false;
+            // An active tool moved into the inventory also left the world.
+            bool still_in_world = false;
             for (size_t i = 0; i < now_count; i++) {
-                if (mark_matches(now[i], g_items_seen[j].guid) && now[i].active) {
-                    still_active = true;
+                if (mark_matches(now[i], g_items_seen[j].guid) &&
+                    now[i].active && !now[i].in_inventory) {
+                    still_in_world = true;
                     break;
                 }
             }
-            if (still_active) continue;
+            if (still_in_world) continue;
             // The mirror image of the equip guard above. Putting a held item back into the
             // quickslots makes it go inactive, which reads as a pickup; but the item was riding
             // the camera when it was last seen, so it never left the holder's hands. A real
@@ -4490,6 +4524,7 @@ void scan_items(bool emit) {
 
     memcpy(g_items_seen, now, sizeof(ItemMark) * now_count);
     g_items_seen_count = now_count;
+
     g_item_scan_ready = true;
 }
 
@@ -4811,6 +4846,9 @@ struct DrivenVehicle {
     bool was_kinematic;
     bool have_kinematic;
     uint32_t last_seq;
+    bool have_seq;
+    double last_pose_at;
+    SeamothMotion motion;
     unsigned long last_seq_frame;
     unsigned long next_resolve_frame;
     // SkyApplier state is checked only after the clone has been activated and had time to run
@@ -4830,6 +4868,22 @@ struct DrivenVehicle {
 static DrivenVehicle g_driven[4];
 static uint8_t g_my_vehicle_guid[16];
 static bool g_my_vehicle_valid = false;
+static void* g_my_vehicle_object = nullptr;
+
+bool is_cyclops_subroot(void* sub) {
+    if (!g_subroot_is_cyclops || !il2cpp_field_get_value || !g_build_alive || !build_live(sub))
+        return false;
+    bool is_cyclops = false;
+    il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(sub), g_subroot_is_cyclops, &is_cyclops);
+    return is_cyclops;
+}
+
+void* cyclops_subroot_on_object(void* go) {
+    if (!go || !g_avatar_subroot_type || !g_get_component || g_get_component_is_string)
+        return nullptr;
+    void* sub = g_get_component.call(go, g_avatar_subroot_type, g_get_component.method);
+    return is_cyclops_subroot(sub) ? sub : nullptr;
+}
 
 void release_driven(DrivenVehicle* slot, const char* why) {
     if (!slot || !slot->used) return;
@@ -4839,7 +4893,9 @@ void release_driven(DrivenVehicle* slot, const char* why) {
         g_object_destroy.call(slot->game_object, g_object_destroy.method);
         slot->game_object = nullptr;
     }
-    if (slot->game_object && slot->have_kinematic && g_rigidbody_type && g_get_component &&
+    if (slot->game_object && slot->have_kinematic &&
+        (!is_cyclops_vehicle(slot->classId) || build_live(slot->game_object)) &&
+        g_rigidbody_type && g_get_component &&
         !g_get_component_is_string && g_rb_set_kinematic) {
         void* body =
             g_get_component.call(slot->game_object, g_rigidbody_type, g_get_component.method);
@@ -4861,6 +4917,7 @@ void clear_driven_vehicles() {
     // anything (restoring flags on freed objects is a use-after-free).
     memset(g_driven, 0, sizeof(g_driven));
     g_my_vehicle_valid = false;
+    g_my_vehicle_object = nullptr;
 }
 
 // Prefab pipeline pieces owned by the held-prop section below; declared here so the
@@ -5567,7 +5624,7 @@ void verify_vehicle_sky(DrivenVehicle* slot) {
 // Instantiates a visual copy of a vehicle the local save never had (diverged worlds:
 // the peer built or drives something absent here). Mirrors spawn_held_prop: park
 // inactive, disable the driver script, kinematic bodies, dead colliders - then the
-// existing per-sequence teleport drives the copy. Returns true when settled
+// received poses drive the copy. Returns true when settled
 // (spawned, or hopeless so the caller stops retrying); false when an async prefab
 // load is still in flight and the caller should try again later.
 bool spawn_driven_from_prefab(DrivenVehicle* slot) {
@@ -5628,49 +5685,54 @@ bool spawn_driven_from_prefab(DrivenVehicle* slot) {
     return true;
 }
 
-// Publishes the piloted vehicle, if any. Runs every frame; inactive publishes are gated so
-// the pump lock is not churned while on foot.
+void stop_publishing_vehicle() {
+    if (!g_my_vehicle_valid) return;
+    net_publish_vehicle(VehicleState{});
+    g_my_vehicle_valid = false;
+}
+
+// Runs on the Unity thread, alongside the normal player pose publisher.
 void publish_local_vehicle(void* player_self, uint32_t flags) {
-    if (!(flags & kFlagPiloting) || !g_player_get_vehicle) {
-        if (g_my_vehicle_valid) {
-            VehicleState out{};
-            out.active = false;
-            net_publish_vehicle(out);
-            g_my_vehicle_valid = false;
-        }
+    g_my_vehicle_object = nullptr;
+    if (!(flags & kFlagPiloting) || !g_get_game_object || !g_get_go_transform || !g_get_position) {
+        stop_publishing_vehicle();
         return;
     }
-    void* vehicle = g_player_get_vehicle.call(player_self, g_player_get_vehicle.method);
+
+    void* vehicle = g_player_get_vehicle
+        ? g_player_get_vehicle.call(player_self, g_player_get_vehicle.method) : nullptr;
+    bool cyclops = false;
+    if (!vehicle && g_player_get_current_sub) {
+        void* sub = g_player_get_current_sub.call(player_self, g_player_get_current_sub.method);
+        if (is_cyclops_subroot(sub)) {
+            vehicle = sub;
+            cyclops = true;
+        }
+    }
     if (!vehicle) {
-        // Piloting without a Vehicle: Cyclops chair and friends, skipped by this pass.
-        static bool s_logged_chair = false;
-        if (!s_logged_chair) {
-            s_logged_chair = true;
-            LOG_INFO("veh: piloting without a Vehicle, vehicle sync skips");
-        }
-        if (g_my_vehicle_valid) {
-            VehicleState out{};
-            out.active = false;
-            net_publish_vehicle(out);
-            g_my_vehicle_valid = false;
-        }
+        stop_publishing_vehicle();
         return;
     }
-    VehicleState out{};
-    if (!component_guid(vehicle, out.guid)) return;  // keep last state on a guid miss
-    // Prefab tag for peers whose save lacks this exact vehicle: the runtime class
-    // name ("SeaMoth"/"Exosuit"/...) fits char[16] and is stable across saves,
-    // unlike the per-save guid. Read-only, no Unity mutation.
-    if (il2cpp_object_get_class && il2cpp_class_get_name) {
-        struct Il2CppClass* vklass = il2cpp_object_get_class(
-            reinterpret_cast<struct Il2CppObject*>(vehicle));
-        const char* vname = vklass ? il2cpp_class_get_name(vklass) : nullptr;
-        if (vname && vname[0]) snprintf(out.classId, sizeof(out.classId), "%s", vname);
-    }
+
     void* go = g_get_game_object.call(vehicle, g_get_game_object.method);
-    if (!go || !g_get_go_transform) return;
+    g_my_vehicle_object = go;
+    VehicleState out{};
+    if (!go || !(cyclops ? avatar_environment_id(go, out.guid) : component_guid(vehicle, out.guid))) {
+        stop_publishing_vehicle();
+        return;
+    }
+    if (cyclops) {
+        memcpy(out.classId, "Cyclops", sizeof("Cyclops"));
+    } else if (il2cpp_object_get_class && il2cpp_class_get_name) {
+        auto* klass = il2cpp_object_get_class(reinterpret_cast<Il2CppObject*>(vehicle));
+        const char* name = klass ? il2cpp_class_get_name(klass) : nullptr;
+        if (name && name[0]) snprintf(out.classId, sizeof(out.classId), "%s", name);
+    }
     void* tf = g_get_go_transform.call(go, g_get_go_transform.method);
-    if (!tf) return;
+    if (!tf) {
+        stop_publishing_vehicle();
+        return;
+    }
     Vector3 p = g_get_position.call(tf, g_get_position.method);
     out.x = p.x;
     out.y = p.y;
@@ -5730,29 +5792,99 @@ void publish_local_vehicle(void* player_self, uint32_t flags) {
     net_publish_vehicle(out);
 }
 
+void apply_interpolated_vehicle_pose(DrivenVehicle& slot, double now) {
+    if (!slot.motion.initialized || !slot.game_object || !g_get_go_transform ||
+        !g_set_position || !g_set_rotation) return;
+    void* tf = g_get_go_transform.call(slot.game_object, g_get_go_transform.method);
+    if (!tf) return;
+    const auto pose = slot.motion.sample(now);
+    const auto q = pose.rotation;
+    g_set_position.call(tf, {pose.x, pose.y, pose.z}, g_set_position.method);
+    g_set_rotation.call(tf, {q.x, q.y, q.z, q.w}, g_set_rotation.method);
+    slot.motion.settled = slot.motion.finished(now);
+}
+
+void drive_vehicle_pose(DrivenVehicle& slot, const VehicleState& state, bool interpolate, double now) {
+    if (!slot.game_object || !g_get_go_transform || !g_set_position) return;
+    const bool smooth = interpolate && g_set_rotation;
+    if (!smooth && !g_set_euler) return;
+    const bool fresh = !slot.have_seq || slot.last_seq != state.sequence ||
+                       slot.last_pose_at != state.updated;
+    if (fresh) {
+        slot.have_seq = true;
+        slot.last_seq = state.sequence;
+        slot.last_pose_at = state.updated;
+        slot.last_seq_frame = g_avatar_frame;
+        if (!vehicle_transform_valid(state)) {
+            static unsigned long s_last_nan_log = 0;
+            if (g_avatar_frame - s_last_nan_log > 150) {
+                s_last_nan_log = g_avatar_frame;
+                LOG_WARN("veh: non-finite pose for pilot %08x seq=%u, skipped",
+                         slot.pilot, state.sequence);
+            }
+            return;
+        }
+        if (smooth) slot.motion.retarget(state, now);
+    }
+
+    if (smooth) {
+        if (fresh || !slot.motion.settled) apply_interpolated_vehicle_pose(slot, now);
+    } else if (fresh) {
+        void* tf = g_get_go_transform.call(slot.game_object, g_get_go_transform.method);
+        if (tf) {
+            g_set_position.call(tf, {state.x, state.y, state.z}, g_set_position.method);
+            g_set_euler.call(tf, {state.pitch, state.yaw, state.roll}, g_set_euler.method);
+        }
+    }
+}
+
 void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
     VehicleState remote[8];
     size_t remote_count = net_copy_vehicles(remote, 8);
+    const double now = monotonic_seconds();
+    const uint32_t local_pilot = net_local_id();
 
     for (size_t r = 0; r < remote_count; r++) {
+        const VehicleState& state = remote[r];
+        const bool cyclops = is_cyclops_vehicle(state.classId);
+        const bool shared_controls = cyclops || is_seamoth_vehicle(state.classId);
+        bool local_driver = shared_controls && g_my_vehicle_valid &&
+                            memcmp(g_my_vehicle_guid, state.guid, sizeof(state.guid)) == 0;
+        if (shared_controls && !local_driver &&
+            remote_vehicle_pilot(state.classId, state.guid, local_pilot, remote, remote_count,
+                                 peers, peer_count, now) != state.pilot) {
+            continue;
+        }
+
         DrivenVehicle* slot = nullptr;
         DrivenVehicle* free_slot = nullptr;
-        for (size_t i = 0; i < 4; i++) {
-            if (g_driven[i].used && g_driven[i].pilot == remote[r].pilot &&
-                memcmp(g_driven[i].guid, remote[r].guid, 16) == 0) {
-                slot = &g_driven[i];
-                break;
+        for (auto& tracked : g_driven) {
+            const bool same_vehicle = tracked.used && memcmp(tracked.guid, state.guid, 16) == 0;
+            if (shared_controls && same_vehicle) {
+                const bool locally_occupied = g_my_vehicle_object &&
+                                              g_my_vehicle_object == tracked.game_object;
+                if (locally_occupied) local_driver = true;
+                if (locally_occupied && tracked.spawned) continue;
+                // Restore a previous driver's physics before binding the new one.
+                if (local_driver || tracked.pilot != state.pilot) {
+                    release_driven(&tracked, local_driver ? "locally piloted" : "pilot changed");
+                }
             }
-            if (!free_slot && !g_driven[i].used) free_slot = &g_driven[i];
+            if (same_vehicle && tracked.used && tracked.pilot == state.pilot) {
+                slot = &tracked;
+                if (!shared_controls) break;
+            }
+            if (!free_slot && !tracked.used) free_slot = &tracked;
         }
+        if (local_driver) continue;
         if (!slot) {
             if (!free_slot) continue;  // table full (4 concurrent remote vehicles)
             slot = free_slot;
             memset(slot, 0, sizeof(*slot));
             slot->used = true;
-            slot->pilot = remote[r].pilot;
-            memcpy(slot->guid, remote[r].guid, sizeof(slot->guid));
-            memcpy(slot->classId, remote[r].classId, sizeof(slot->classId));
+            slot->pilot = state.pilot;
+            memcpy(slot->guid, state.guid, sizeof(slot->guid));
+            memcpy(slot->classId, state.classId, sizeof(slot->classId));
             slot->last_seq_frame = g_avatar_frame;
             slot->last_piloting_frame = g_avatar_frame;  // grace starts at claim
             // Throttled: a ghost entry re-tracks every frame until the pump expiry drops it.
@@ -5766,9 +5898,31 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
             }
         }
         // I drive this one myself: the remote copy is bogus, never touch it.
-        if (g_my_vehicle_valid && memcmp(g_my_vehicle_guid, remote[r].guid, 16) == 0) {
+        if (g_my_vehicle_valid && memcmp(g_my_vehicle_guid, state.guid, 16) == 0) {
             release_driven(slot, "locally piloted");
             continue;
+        }
+        if (cyclops && slot->game_object && !build_live(slot->game_object)) {
+            slot->game_object = nullptr;
+            slot->have_kinematic = false;
+            slot->have_seq = false;
+            slot->motion = {};
+        }
+        if (cyclops && !slot->game_object) {
+            if (g_avatar_frame < slot->next_resolve_frame) continue;
+            slot->next_resolve_frame = g_avatar_frame + 60;
+            // Both players drive the loaded SubRoot with this identity. Spawning a
+            // prefab would create a second interior without the saved contents.
+            void* go = g_build_alive ? avatar_shared_subroot(slot->guid) : nullptr;
+            if (!cyclops_subroot_on_object(go) || !g_rigidbody_type ||
+                !g_rb_get_kinematic || !g_rb_set_kinematic) continue;
+            void* body = g_get_component.call(go, g_rigidbody_type, g_get_component.method);
+            if (!build_live(body)) continue;
+            slot->game_object = go;
+            slot->was_kinematic = g_rb_get_kinematic.call(body, g_rb_get_kinematic.method);
+            slot->have_kinematic = true;
+            g_rb_set_kinematic.call(body, true, g_rb_set_kinematic.method);
+            LOG_INFO("veh: driving shared Cyclops for pilot %08x", slot->pilot);
         }
         if (!slot->game_object) {
             uint32_t tech = vehicle_tech_for_class(slot->classId);
@@ -5779,7 +5933,7 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
                 // (cheap slot lookup, no scene scan). The copy pops in on arrival.
                 bool settled = spawn_driven_from_prefab(slot);
                 if (slot->game_object) {
-                    // spawned — fall through to the teleport below
+                    // spawned — fall through to the first pose
                 } else {
                     if (settled) slot->next_resolve_frame = g_avatar_frame + 900;
                     continue;
@@ -5795,7 +5949,7 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
                                  slot->pilot, slot->classId);
                         continue;
                     }
-                    // spawned — fall through to the teleport below
+                    // spawned — fall through to the first pose
                 } else {
                     slot->game_object = go;
                     if (g_rigidbody_type && g_get_component && !g_get_component_is_string) {
@@ -5815,63 +5969,42 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
         // The prefab copy's SkyApplier is verified only after activation and Start().
         verify_vehicle_sky(slot);
 
-        // Teleport on every new sequence; the motor reads the local player, who is elsewhere.
-        // Temporary Luna diagnostics, round 4: a non-finite pose (NaN from a torn read or a
-        // corrupt packet) would collapse bounds/culling and blacken the screen until a valid
-        // pose arrives. Drop it loudly instead of teleporting into it.
-        if (remote[r].sequence != slot->last_seq && slot->game_object && g_get_go_transform &&
-            g_set_position && g_set_euler) {
-            if (!isfinite(remote[r].x) || !isfinite(remote[r].y) || !isfinite(remote[r].z) ||
-                !isfinite(remote[r].yaw) || !isfinite(remote[r].pitch) ||
-                !isfinite(remote[r].roll)) {
-                static unsigned long s_last_nan_log = 0;
-                if (g_avatar_frame - s_last_nan_log > 150) {
-                    s_last_nan_log = g_avatar_frame;
-                    LOG_WARN("veh: non-finite pose for pilot %08x seq=%u, teleport skipped",
-                             slot->pilot, remote[r].sequence);
-                }
-            } else {
-                void* tf = g_get_go_transform.call(slot->game_object, g_get_go_transform.method);
-                if (tf) {
-                    Vector3 p;
-                    p.x = remote[r].x;
-                    p.y = remote[r].y;
-                    p.z = remote[r].z;
-                    g_set_position.call(tf, p, g_set_position.method);
-                    Vector3 e;
-                    e.x = remote[r].pitch;
-                    e.y = remote[r].yaw;
-                    e.z = remote[r].roll;
-                    g_set_euler.call(tf, e, g_set_euler.method);
-                }
-            }
-            slot->last_seq = remote[r].sequence;
-            slot->last_seq_frame = g_avatar_frame;
-        }
+        drive_vehicle_pose(*slot, state, shared_controls, now);
     }
 
     // Release: pilot exited (flags), pilot gone, or link stale (~6 s without a sequence).
     for (size_t i = 0; i < 4; i++) {
         DrivenVehicle* slot = &g_driven[i];
         if (!slot->used) continue;
-        bool pilot_here = false;
-        bool piloting = false;
+        if ((is_seamoth_vehicle(slot->classId) || is_cyclops_vehicle(slot->classId)) &&
+            g_my_vehicle_object &&
+            g_my_vehicle_object == slot->game_object) {
+            if (!slot->spawned) release_driven(slot, "locally piloted");
+            else slot->motion = {};
+            continue;
+        }
+        const PeerState* pilot = nullptr;
         for (size_t j = 0; j < peer_count; j++) {
             if (peers[j].id == slot->pilot) {
-                pilot_here = true;
-                if ((peers[j].flags & kFlagPiloting) != 0) piloting = true;
+                pilot = &peers[j];
                 break;
             }
         }
-        if (!pilot_here) {
+        if (!pilot) {
             release_driven(slot, "pilot gone");
         } else {
+            const bool piloting = (pilot->flags & kFlagPiloting) != 0;
             if (piloting) slot->last_piloting_frame = g_avatar_frame;
             if (!piloting &&
                 g_avatar_frame - slot->last_piloting_frame > 120) {  // ~4 s grace
                 release_driven(slot, "exited");
             } else if (g_avatar_frame - slot->last_seq_frame > 180) {
                 release_driven(slot, "stale");
+            } else if (!piloting && pilot->seq_valid && slot->have_seq &&
+                       vehicle_sequence_newer(pilot->sequence, slot->last_seq) &&
+                       slot->motion.initialized && !slot->motion.settled) {
+                // Finish the last accepted blend when the pilot gets out.
+                apply_interpolated_vehicle_pose(*slot, now);
             }
         }
     }
@@ -6011,6 +6144,12 @@ void clear_prefab_request(PrefabRequest* slot) {
 }
 void reset_prefab_requests() {
     for(auto& slot:g_prefab_requests)clear_prefab_request(&slot);
+    for (auto& pending : g_pending_events) pending.used = false;
+    g_item_scan_ready = false;
+    g_guest_inventory_identity_ready = false;
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    reset_shared_progress();
+#endif
     LOG_INFO("prefab requests: cleared GC roots for world transition");
 }
 bool bind_prefab_request(PrefabRequest* slot, void* request) {
@@ -6156,6 +6295,8 @@ void destroy_held_prop(RemoteAvatar* avatar) {
         g_destroy.call(avatar->held_prop, g_destroy.method);
     }
     avatar->held_prop = nullptr;
+    avatar->held_sky_applier = nullptr;
+    avatar->held_sky_apply_after = 0;
     avatar->held_lights_parent=nullptr;
     avatar->held_light_count=0;
     avatar->held_body_pose=false;
@@ -6566,8 +6707,56 @@ void hide_remote_seaglide_map(void* prop, void* root) {
     }
 }
 
-// Instantiates the prop for one avatar. True when it is in place, false when no source exists
-// yet (the caller retries on a cooldown) or the API is incomplete.
+void* attach_held_prop_sky(void* prop) {
+    if (!g_add_component || !g_get_components_in_children || !g_array_get_length ||
+        !g_array_get_value || !g_renderer_type_obj || !g_sky_type_obj ||
+        !g_behaviour_set_enabled || !il2cpp_field_set_value_object) return nullptr;
+    static void* renderers_field = build_field_on(find_class_in_domain("", "SkyApplier"),
+                                                 "renderers", kSkyRenderersOffset);
+    if (!renderers_field) return nullptr;
+    ManagedRoot renderers;
+    void* found = g_get_components_in_children.call(prop, g_renderer_type_obj, true,
+                                                   g_get_components_in_children.method);
+    const int count = found ? g_array_get_length.call(found, g_array_get_length.method) : 0;
+    if (count <= 0 || count > 256 || !prefab_retain(renderers, found)) return nullptr;
+    void* old = g_get_components_in_children.call(prop, g_sky_type_obj, true,
+                                                 g_get_components_in_children.method);
+    const int old_count = old ? g_array_get_length.call(old, g_array_get_length.method) : 0;
+    if (old_count < 0 || old_count > 16) return nullptr;
+    ManagedRoot old_appliers;
+    if (old_count && !prefab_retain(old_appliers, old)) return nullptr;
+    void* sky = g_add_component.call(prop, g_sky_type_obj, g_add_component.method);
+    if (!sky) return nullptr;
+    // Use the clone's meshes and the room the player occupies. A prefab's
+    // own applier may target a different sky and overwrite these renderers.
+    for (int i = 0; i < old_count; ++i) {
+        void* applier = g_array_get_value.call(old_appliers.get(), i, g_array_get_value.method);
+        if (applier) g_behaviour_set_enabled.call(applier, false, g_behaviour_set_enabled.method);
+    }
+    char* fields = static_cast<char*>(sky);
+    *reinterpret_cast<int32_t*>(fields + kSkyAnchorSkyOffset) = 0; // Skies.Auto
+    *reinterpret_cast<bool*>(fields + kSkyDynamicOffset) = true;
+    *reinterpret_cast<bool*>(fields + kSkyEmissiveFromPowerOffset) = false;
+    il2cpp_field_set_value_object(reinterpret_cast<Il2CppObject*>(sky), renderers_field,
+                                  reinterpret_cast<Il2CppObject*>(renderers.get()));
+    return sky;
+}
+
+void tick_held_prop_sky(RemoteAvatar* avatar) {
+    if (!avatar->held_sky_applier || !avatar->held_sky_apply_after ||
+        g_avatar_frame < avatar->held_sky_apply_after || !g_avatar_apply_environment ||
+        !g_go_get_active_self || !g_go_get_active_self.call(avatar->held_prop, g_go_get_active_self.method)) return;
+    void* environment = nullptr;
+    if (avatar->sky_environment_bound && g_transform_get_parent && g_get_game_object) {
+        void* parent = g_transform_get_parent.call(avatar->transform, g_transform_get_parent.method);
+        if (parent) environment = g_get_game_object.call(parent, g_get_game_object.method);
+    }
+    g_avatar_apply_environment.call(avatar->held_sky_applier, environment, g_avatar_apply_environment.method);
+    avatar->held_sky_apply_after = 0;
+    log_sky_applier_fields("held-tool lighting", avatar->held_sky_applier, -1);
+}
+
+// False means the prop source is still loading and the caller may retry.
 bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
     if (!g_instantiate || !g_set_active || !g_object_destroy || !g_get_go_transform ||
         !g_set_position || !g_get_component) {
@@ -6684,8 +6873,10 @@ bool spawn_held_prop(RemoteAvatar* avatar, uint32_t tech) {
         LOG_INFO("held grip: peer=%08x tech=%u native=%u plug=%p",avatar->id,tech,
                  unsigned(avatar->held_native_grip),avatar->held_plug_origin);
     }
-    g_set_active.call(prop, !avatar->held_body_pose, g_set_active.method);
     avatar->held_prop = prop;
+    avatar->held_sky_applier = attach_held_prop_sky(prop);
+    avatar->held_sky_apply_after = avatar->held_sky_applier ? g_avatar_frame + 1 : 0;
+    g_set_active.call(prop, !avatar->held_body_pose, g_set_active.method);
     LOG_INFO("held prop: peer %08x now carries tech %u (source=%p prop=%p parent=%p)", avatar->id,
              tech, source, prop, parent_tf);
     return true;
@@ -6740,6 +6931,7 @@ void resolve_item_api() {
     }
 
     g_unique_get_id.bind(find_method(g_unique_identifier_class, "get_Id", 0));
+    g_unique_try_get.bind(find_method(g_unique_identifier_class, "TryGetIdentifier", 2));
     g_unique_get_class_id.bind(find_method(g_unique_identifier_class, "get_ClassId", 0));
     g_pickup_get_attached.bind(find_method(pickupable, "get_attached", 0));
     // Pickupable.GetTechType is how the held-item sync reads what the quickslot hand carries.
@@ -6889,6 +7081,11 @@ void resolve_item_api() {
     // attempt to bind it by name on Player logged as unresolved.
     struct Il2CppClass* inventory = find_class_in_domain("", "Inventory");
     g_inventory_class = inventory;
+    g_inventory_get_container.bind(find_method(inventory, "get_container", 0));
+    g_pickup_inventory_item_field = build_field_on(pickupable, "inventoryItem", 0x60);
+
+    g_inventory_item_owner_field =
+        build_field_on(find_class_in_domain("", "InventoryItem"), "container", 0x20);
     g_player_drop_held_item.bind(find_method(inventory, "DropHeldItem", 1));
     if (!g_player_drop_held_item) {
         LOG_WARN("item api: Inventory.DropHeldItem unresolved, a held object cannot be released");
@@ -6902,10 +7099,24 @@ void resolve_item_api() {
     struct Il2CppClass* player_class = find_class_in_domain("", "Player");
     if (player_class) {
         g_player_get_vehicle.bind(find_method(player_class, "GetVehicle", 0));
+        g_player_get_current_sub.bind(find_method(player_class, "GetCurrentSub", 0));
     }
     if (!g_player_get_vehicle) {
-        LOG_WARN("item api: Player.GetVehicle unresolved, vehicle sync disabled");
+        LOG_WARN("vehicle api: Player.GetVehicle unresolved");
     }
+    auto* subroot = find_class_in_domain("", "SubRoot");
+    if (subroot && il2cpp_class_get_fields && il2cpp_field_get_name) {
+        void* iterator = nullptr;
+        while (auto* field = il2cpp_class_get_fields(subroot, &iterator)) {
+            const char* name = il2cpp_field_get_name(field);
+            if (name && strcmp(name, "isCyclops") == 0) {
+                g_subroot_is_cyclops = field;
+                break;
+            }
+        }
+    }
+    LOG_INFO("vehicle api: Cyclops current sub=%p isCyclops field=%p",
+             (void*)g_player_get_current_sub.call, g_subroot_is_cyclops);
     // The equipment read: Inventory.get_equipment -> Equipment.GetTechTypeInSlot(slot).
     g_inventory_get_equipment.bind(find_method(inventory, "get_equipment", 0));
     struct Il2CppClass* equipment = find_class_in_domain("", "Equipment");
@@ -7012,7 +7223,7 @@ void hooked_player_update(void* self, void* method) {
 
     LocalState local{};
     if (read_player_transform(self, &local)) {
-        local.flags = read_player_flags(self);
+        local.flags = read_player_flags(self, local.y);
     }
     local.flags |= read_using_tool_flag();
     // What the quickslot hand carries, so the peers can hang a copy of it on their avatar.
@@ -7042,7 +7253,7 @@ void hooked_player_update(void* self, void* method) {
     if(published.valid)update_peer_avatars(self);
 
     // Remote pickups and drops, applied on this thread because Pickupable belongs to Unity.
-    pump_remote_events();
+    pump_remote_events(published);
     // Host publishes its clock, guest corrects against it (day/night sync); also stamps
     // g_world_live_since, the anchor the re-id gate below waits on.
     time_sync_tick();
@@ -7058,16 +7269,20 @@ void hooked_player_update(void* self, void* method) {
         __atomic_store_n(&g_role_note_pending, false, __ATOMIC_RELAXED);
         g_reid_wanted = true;
     }
-    static bool inventory_reid = false;
-    if (!inventory_reid && g_role_known && !g_local_is_host && (n % 900) == 3) {
+    if (!g_guest_inventory_identity_ready && g_role_known && !g_local_is_host && (n % 900) == 3) {
         g_reid_wanted = true;
     }
     bool world_settled = g_world_live_since > 0.0 &&
                          monotonic_seconds() - g_world_live_since >= kReidSettleSeconds &&
                          (local.x != 0.0f || local.y != 0.0f || local.z != 0.0f);
     if (g_reid_wanted && !g_local_is_host && world_settled) {
-        inventory_reid = reid_local_inventory();  // false = not ready yet, try again next frame
-        if (inventory_reid) g_reid_wanted = false;
+        // Restored guest items already have their persistent identities. Changing
+        // them would break equipped/quick-slot references and transfer journals.
+        if (!g_guest_inventory_identity_ready) {
+            g_guest_inventory_identity_ready =
+                world_guest_profile_applied(g_world_context_watch.slot) || reid_local_inventory();
+        }
+        if (g_guest_inventory_identity_ready) g_reid_wanted = false;
     }
     // The sweep runs after the pump so a remote event is applied first and is part of this
     // tick's snapshot rather than being seen as a change on the next one.
@@ -7077,6 +7292,7 @@ void hooked_player_update(void* self, void* method) {
     // Resolves its API lazily on the first call, so nothing extra happens at install time.
     tick_build_sync(g_local_player, local);
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
+    tick_shared_progress(published);
     tick_locker_contents(local);
     if(!tick_creature_motion_probe(local))tick_creature_probe(local);
     tick_boomerang_sync(published, g_creature_motion_probe.armed || g_creature_probe.requested || g_creature_probe.active);
@@ -7408,7 +7624,42 @@ void world_notice_tick() {
 }
 
 void hooked_slm_update(void* self, void* method) {
+    struct GuestSaveWatch {
+        bool saving = false;
+        bool armed = false;
+        char slot[24]{};
+        WorldGuestSaveStamp stamp{};
+    };
+    static GuestSaveWatch guest_save;
+    const auto guest_inventory_settled = [] {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        if (g_contents_pending.used || g_contents_load.active) return false;
+#endif
+        return g_guest_inventory_identity_ready;
+    };
+    const bool saving_before = g_slm_is_saving && g_slm_is_saving.call(self, g_slm_is_saving.method);
+    if (saving_before && !guest_save.saving) {
+        guest_save = {};
+        guest_save.saving = true;
+        uint8_t joined_world[16];
+        if (g_role_known && !g_local_is_host && guest_inventory_settled() && g_slm_get_current_slot &&
+            string_to_ascii(g_slm_get_current_slot.call(self, g_slm_get_current_slot.method),
+                            guest_save.slot, sizeof(guest_save.slot)) &&
+            net_session_guest_world(guest_save.slot, joined_world)) {
+            guest_save.armed = world_guest_save_stamp(guest_save.slot, joined_world, &guest_save.stamp);
+        }
+    }
     if (g_slm_update_original) g_slm_update_original(self, method);
+    if (guest_save.saving && !g_slm_is_saving.call(self, g_slm_is_saving.method)) {
+        uint8_t joined_world[16];
+        if (guest_save.armed && !g_local_is_host && guest_inventory_settled() &&
+            net_session_guest_world(guest_save.slot, joined_world) &&
+            memcmp(joined_world, guest_save.stamp.world, sizeof(joined_world)) == 0 &&
+            !world_guest_checkpoint(guest_save.slot, guest_save.stamp)) {
+            LOG_WARN("guest progress: no new verified checkpoint, previous progress retained");
+        }
+        guest_save = {};
+    }
     world_context_tick(self);
     world_notice_tick();
     menu_autoload_tick();
@@ -7490,9 +7741,10 @@ bool install_managed_hooks() {
     g_is_inside.bind(find_method(player, "IsInside", 0));
     g_is_piloting.bind(find_method(player, "IsPiloting", 0));
     g_is_underwater_for_swimming.bind(find_method(player, "IsUnderwaterForSwimming", 0));
-    LOG_INFO("player predicates: swimming=%p inside=%p piloting=%p underwaterForSwimming=%p",
+    g_get_water_level.bind(find_method(player, "GetWaterLevel", 0));
+    LOG_INFO("player predicates: swimming=%p inside=%p piloting=%p underwaterForSwimming=%p waterLevel=%p",
              (void*)g_is_swimming.call, (void*)g_is_inside.call, (void*)g_is_piloting.call,
-             (void*)g_is_underwater_for_swimming.call);
+             (void*)g_is_underwater_for_swimming.call, (void*)g_get_water_level.call);
 
     resolve_avatar_api();
 

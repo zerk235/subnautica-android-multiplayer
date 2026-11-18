@@ -14,6 +14,7 @@ int main(){
     lc::Message q;q.kind=lc::Request;q.recipient=1;q.request=9;q.revision=1;q.locker=key;
     q.item={fp::guid(id.fish),fp::kBoomerang,{}};assert(fp::valid(q));
     q.item.tech=creature_motion::kBladderfishTech;assert(fp::valid(q));
+    q.item.tech=creature_motion::kHoopfishTech;assert(fp::valid(q));
     auto bad=q;bad.item.data={1};assert(!fp::valid(bad));
     bad=q;bad.item.tech++;assert(!fp::valid(bad));
     bad=q;bad.item.id=fp::guid(other.fish);assert(!fp::valid(bad));
@@ -58,7 +59,7 @@ int main(){
     assert(full.finish(2,tampered,true).item.data==item.data); // Immutable granted snapshot.
     std::vector<uint8_t> bytes;assert(lc::encode(grant,&bytes));lc::Message decoded;
     assert(lc::decode(bytes,&decoded)&&fp::valid(decoded)&&decoded.item.data==item.data&&
-           decoded.item.tech==creature_motion::kBladderfishTech);
+           decoded.item.tech==creature_motion::kHoopfishTech);
     auto reset=q;reset.kind=lc::Snapshot;reset.recipient=0;reset.revision=3;reset.request=100;
     assert(fp::valid(reset));reset.request=uint64_t(UINT32_MAX)+1;assert(!fp::valid(reset));
     assert(fp::pose_after_floor(100,100)&&fp::pose_after_floor(101,100)&&!fp::pose_after_floor(99,100));

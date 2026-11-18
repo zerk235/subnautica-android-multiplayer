@@ -1,3 +1,4 @@
+#define SNMOD_BASE_GEOMETRY_APPLY
 #include "modloader/src/net.h"
 #include <cassert>
 #include <cstring>
@@ -13,16 +14,18 @@ struct Obj { bool live=true; const char* id=""; };
 struct RemoteAvatar {
     uint32_t id=1;
     void *game_object=nullptr,*transform=nullptr,*sky_applier=nullptr;
+    void* held_sky_applier=nullptr;
+    unsigned long held_sky_apply_after=0;
     uint8_t sky_environment_id[16]{};
     bool sky_environment_bound=false;
     unsigned long sky_environment_next=0;
 };
-Obj player,visual,sky,base_a{true,"base-a"},base_b{true,"base-b"};
+Obj player,visual,sky,held_sky,base_a{true,"base-a"},base_b{true,"base-b"}, pod{true,"local-pod-id"};
 unsigned long g_avatar_frame=1;
 void* g_remote_arms[2]{};
 void* g_unique_identifier_type=&player;
 void* g_avatar_subroot_type=&player;
-void *local_environment=&base_a,*parent=nullptr,*applied=nullptr;
+void *local_environment=&base_a,*parent=nullptr,*applied=nullptr,*held_applied=nullptr;
 unsigned parent_calls=0,apply_calls=0;
 std::vector<void*> interiors{&base_a,&base_b};
 bool live(void* obj,void*) { return obj && static_cast<Obj*>(obj)->live; }
@@ -47,6 +50,7 @@ void set_parent(void*,void* target,bool keep_world,void*) {
 }
 Entry<decltype(&set_parent)> g_set_parent{&set_parent};
 void apply_environment(void* target,void* environment,void*) {
+    if (target==&held_sky) {held_applied=environment;return;}
     assert(target==&sky); applied=environment; ++apply_calls;
 }
 Entry<decltype(&apply_environment)> g_avatar_apply_environment{&apply_environment};
@@ -58,6 +62,7 @@ void* item(void*,int i,void*) { return interiors.at(i); }
 Entry<decltype(&item)> g_array_get_value{&item};
 void* object(void* obj,void*) { return obj; }
 Entry<decltype(&object)> g_get_game_object{&object},g_get_go_transform{&object};
+void* shared_pod() { return &pod; }
 void log_sky_applier_fields(const char*,void*,int) {}
 #include "modloader/src/avatar_environment.inc"
 int main() {
@@ -106,8 +111,27 @@ int main() {
     g_avatar_frame+=31;
     update_avatar_environment(&avatar,peer);
     assert(parent==&base_a && avatar.sky_environment_bound);
+    // The radio/capsule world exists outside the SubRoot list. Its native
+    // object identity can differ on the other phone.
+    local_environment=&pod;
+    read_avatar_environment(&player,&sample);
+    assert(!memcmp(sample.environment_id,kLifepodEnvironment,16));
+    memcpy(peer.environment_id,sample.environment_id,16);
+    local_environment=&base_b;
+    pod.id="other-phone-pod-id";
+    pod.live=false;
+    update_avatar_environment(&avatar,peer);
+    assert(!parent && !applied && !avatar.sky_environment_bound);
+    pod.live=true;
+    avatar.held_sky_applier=&held_sky;
+    g_avatar_frame+=31;
+    update_avatar_environment(&avatar,peer);
+    assert(parent==&pod && applied==&pod && held_applied==&pod && avatar.sky_environment_bound);
+    peer.flags=0;
+    update_avatar_environment(&avatar,peer);
+    assert(!parent && !applied && !held_applied && !avatar.sky_environment_bound);
     visual.live=false;
     g_remote_arms[0]=&visual;
     assert(!avatar_object_live(&avatar) && !g_remote_arms[0]);
-    puts("actual avatar environment: exact interior, transitions, missing/duplicate IDs and destroyed parent passed");
+    puts("actual avatar environment: exact interior, lifepod, transitions, missing/duplicate IDs and destroyed parent passed");
 }

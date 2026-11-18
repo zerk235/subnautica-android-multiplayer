@@ -137,6 +137,23 @@ struct WorldLoadFields {
 // *out is zeroed either way.
 bool world_read_load_fields(const char* slot, WorldLoadFields* out);
 
+struct WorldGuestSaveStamp {
+    struct File {
+        uint64_t size = 0, device = 0, inode = 0;
+        int64_t seconds = 0, nanoseconds = 0;
+        bool operator==(const File& other) const {
+            return size == other.size && device == other.device && inode == other.inode &&
+                   seconds == other.seconds && nanoseconds == other.nanoseconds;
+        }
+    };
+    uint8_t world[16]{};
+    File gameinfo, scene;
+};
+bool world_guest_save_stamp(const char* slot, const uint8_t joined_world[16], WorldGuestSaveStamp* stamp);
+bool world_guest_checkpoint(const char* slot, const WorldGuestSaveStamp& before);
+bool world_guest_profile_applied(const char* slot);
+bool world_guest_receive_has_profile();
+
 // The receive buffers, for the transport to read a manifest back out of.
 const WorldManifest* world_receive_manifest();
 uint8_t* world_receive_file_data(int file_index, uint32_t size);

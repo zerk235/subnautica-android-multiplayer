@@ -116,7 +116,6 @@ constexpr size_t kWorldOfferLimit = kWorldMaxTransferBytes;
 
 constexpr double kTimePacketInterval = 1.0;  // the host publishes its clock at 1 Hz
 
-constexpr double kVehicleInterval = 0.1;  // piloted vehicles ship at 10 Hz
 constexpr size_t kMaxVehicles = 8;        // one slot per driving peer, room to spare
 constexpr double kVehicleTimeout = 5.0;   // drop poses nobody refreshes (mirrors peers)
 
@@ -626,6 +625,7 @@ const char* event_kind_name(uint8_t kind) {
         case kWorldEventRemove: return "remove";
         case kWorldEventLockerContents: return "locker-contents";
         case kWorldEventFishPickup: return "fish-pickup";
+        case kWorldEventSharedProgress: return "shared-progress";
         default: return "event";
     }
 }
@@ -635,7 +635,8 @@ const char* event_kind_name(uint8_t kind) {
 bool event_kind_known(uint8_t kind) {
     return kind == kWorldEventPickup || kind == kWorldEventDrop ||
            kind == kWorldEventBuild || kind == kWorldEventProgress ||
-           kind == kWorldEventRemove || kind == kWorldEventLockerContents || kind == kWorldEventFishPickup;
+           kind == kWorldEventRemove || kind == kWorldEventLockerContents ||
+           kind == kWorldEventFishPickup || kind == kWorldEventSharedProgress;
 }
 
 struct EventSlot {
@@ -1065,6 +1066,14 @@ pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
 LocalState g_local{};
 double g_local_publish_at = 0.0;
 uint64_t g_local_serial = 0;
+struct SentPose {
+    uint32_t recipient;
+    uint32_t sequence;
+    double sent_at;
+};
+constexpr size_t kSentPoseHistory = 128;
+SentPose g_sent_poses[kSentPoseHistory]{};
+size_t g_next_sent_pose = 0;
 // Piloted-vehicle snapshot, same discipline: written every frame while driving.
 VehicleState g_local_vehicle{};
 
@@ -1570,7 +1579,15 @@ int send_state(const PeerState& peer, const LocalState& local, int* error_out) {
         packet.flags|=kFlagHeldWorldPose;
         packet.held_offset=local.held_offset;
     }
-    return send_to(&packet, sizeof(packet), peer.raw, error_out);
+    const double now = monotonic_seconds();
+    const int sent = send_to(&packet, sizeof(packet), peer.raw, error_out);
+    if (sent == sizeof(packet)) {
+        pthread_mutex_lock(&g_state_lock);
+        g_sent_poses[g_next_sent_pose] = {peer.id, packet.sequence, now};
+        g_next_sent_pose = (g_next_sent_pose + 1) % kSentPoseHistory;
+        pthread_mutex_unlock(&g_state_lock);
+    }
+    return sent;
 }
 
 void send_vehicle(const PeerState& peer, const VehicleState& vehicle) {
@@ -1873,7 +1890,9 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
                     // native save. It still needs the transaction below: retain the
                     // native original and commit the guest marker before autoload.
                     const bool adopt_native = preserve_local && !world_slot_is_host_received(slot);
-                    if (slot_check == kWorldSlotMatches && !adopt_native) {
+                    const bool restore_profile = slot_check == kWorldSlotMatches &&
+                        world_slot_is_host_received(slot) && world_guest_receive_has_profile();
+                    if (slot_check == kWorldSlotMatches && !adopt_native && !restore_profile) {
                         adopt_received_world_identity(g_receive_generation);
                         set_handoff(kWorldHandoffWritten, slot,
                                     "slot already on disk, all manifest files verified");
@@ -1881,7 +1900,7 @@ void handle_world_packet(const uint8_t* data, size_t size, const struct sockaddr
                         world_reset_receive();
                         ok = true;
                     } else if (slot_check == kWorldSlotConflict ||
-                               (slot_check == kWorldSlotMatches && adopt_native)) {
+                               (slot_check == kWorldSlotMatches && (adopt_native || restore_profile))) {
                         // A slot this device received from a peer earlier may be refreshed by
                         // the same peer's newer copy: that is the "host published a newer
                         // world" flow, and the stale local bytes are exactly what should be
@@ -2552,6 +2571,7 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
             }
             ++stream.rx_applied;
             stream.last_applied = now;
+            peer->pose_received_at = now;
             peer->sequence = packet.sequence;
             peer->seq_valid = true;
             peer->x = packet.x;
@@ -3481,7 +3501,8 @@ void net_post_world_event(const WorldEvent& event, bool already_applied) {
 }
 
 bool net_try_post_world_event(const WorldEvent& event) {
-    return (event.kind==kWorldEventLockerContents || event.kind==kWorldEventFishPickup) && queue_local_event(event,true);
+    return (event.kind==kWorldEventLockerContents || event.kind==kWorldEventFishPickup ||
+            event.kind==kWorldEventSharedProgress) && queue_local_event(event,true);
 }
 uint32_t net_session_host_id() {
     pthread_mutex_lock(&g_session.lock);
@@ -3590,6 +3611,20 @@ void net_publish(const LocalState& local) {
     pthread_mutex_unlock(&g_state_lock);
 }
 
+double net_sent_pose_age(uint32_t recipient, uint32_t sequence) {
+    if (!recipient || !sequence) return -1;
+    double sent_at = -1;
+    pthread_mutex_lock(&g_state_lock);
+    for (const auto& pose : g_sent_poses) {
+        if (pose.recipient == recipient && pose.sequence == sequence) {
+            sent_at = pose.sent_at;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_state_lock);
+    return sent_at < 0 ? -1 : monotonic_seconds() - sent_at;
+}
+
 void net_publish_vehicle(const VehicleState& vehicle) {
     pthread_mutex_lock(&g_state_lock);
     g_local_vehicle = vehicle;
@@ -3669,6 +3704,17 @@ size_t net_copy_sessions(SessionCandidate* out, size_t max) {
     }
     pthread_mutex_unlock(&g_peers_lock);
     return count;
+}
+
+bool net_session_guest_world(const char* slot, uint8_t out_guid[16]) {
+    if (!slot || !*slot || !out_guid) return false;
+    pthread_mutex_lock(&g_session.lock);
+    const bool valid = g_session.state == kSessionGuest && g_session.active &&
+        g_session.local_member && !g_session.local_host && !g_session.explicit_leave &&
+        g_session.content_guid_valid && strcmp(slot, g_session.slot) == 0;
+    if (valid) memcpy(out_guid, g_session.content_guid, sizeof(g_session.content_guid));
+    pthread_mutex_unlock(&g_session.lock);
+    return valid;
 }
 
 SessionState net_session_state() {

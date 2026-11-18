@@ -21,8 +21,7 @@ std::uint32_t seamoth_seat_occupant(void* vehicle) {
         // Use that association, never a nearest-vehicle / position heuristic.
         void* go=g_get_game_object?g_get_game_object.call(vehicle,g_get_game_object.method):nullptr;
         for(const auto& driven:g_driven) {
-            if(go&&driven.used&&driven.game_object==go&&
-               !std::memcmp(driven.classId,"SeaMoth",7)&&!driven.classId[7]) {
+            if(go&&driven.used&&driven.game_object==go&&is_seamoth_vehicle(driven.classId)) {
                 std::memcpy(guid,driven.guid,16);replica=true;break;
             }
         }
@@ -69,7 +68,7 @@ void hooked_seamoth_enter(void* vehicle,void* player,bool teleport,bool animatio
     if(g_seamoth_enter_original)g_seamoth_enter_original(vehicle,player,teleport,animation,method);
 }
 
-bool seamoth_patch_slot(Il2CppClass* klass,Il2CppMethodInfo* method,unsigned expected_slot,
+bool patch_managed_vtable_slot(Il2CppClass* klass,Il2CppMethodInfo* method,unsigned expected_slot,
                        void* replacement,void** original) {
     if(!klass||!method)return false;
     auto* info=reinterpret_cast<char*>(method);
@@ -100,8 +99,8 @@ void install_seamoth_seat_hooks() {
     // but changing its shared MethodInfo would also intercept other vehicles.
     void* click_original=reinterpret_cast<void*>(g_seamoth_click_original);
     void* enter_original=reinterpret_cast<void*>(g_seamoth_enter_original);
-    const bool clicked=seamoth_patch_slot(seamoth,click,6,reinterpret_cast<void*>(&hooked_seamoth_hand_click),&click_original);
-    const bool entered=seamoth_patch_slot(seamoth,enter,53,reinterpret_cast<void*>(&hooked_seamoth_enter),&enter_original);
+    const bool clicked=patch_managed_vtable_slot(seamoth,click,6,reinterpret_cast<void*>(&hooked_seamoth_hand_click),&click_original);
+    const bool entered=patch_managed_vtable_slot(seamoth,enter,53,reinterpret_cast<void*>(&hooked_seamoth_enter),&enter_original);
     g_seamoth_click_original=reinterpret_cast<VehicleClickFn>(click_original);
     g_seamoth_enter_original=reinterpret_cast<VehicleEnterFn>(enter_original);
     g_seamoth_seat_hooks=clicked&&entered;

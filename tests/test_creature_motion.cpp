@@ -101,7 +101,40 @@ int main(){
     bladderfish.sequence++;
     assert(!runtime.accept(bladderfish, 2)); // Same GUID with a different species is not the same stream.
     bad = request; bad.species = Species::Bladderfish; assert(!valid(bad));
-    wire[1] = 3; assert(!decode(wire.data(), wire.size(), &decoded));
+    auto hoopfish = live;
+    hoopfish.species = Species::Hoopfish;
+    hoopfish.fish[0] ^= 0x80;
+    assert(tech_for_species(hoopfish.species) == 2531);
+    assert(species_for_tech(2531) == Species::Hoopfish);
+    assert(encode(hoopfish, &wire) && wire[1] == 3);
+    assert(decode(wire.data(), wire.size(), &decoded) && same_run(decoded, hoopfish));
+    bad = request; bad.species = Species::Hoopfish; assert(!valid(bad));
+    wire[1] = 255; assert(!decode(wire.data(), wire.size(), &decoded));
+    auto stalker = live;
+    stalker.species = Species::Stalker;
+    stalker.bite = {1, stalker.host, 0, 0};
+    assert(encode(stalker, &wire) && wire.size() == kStalkerWireSize);
+    assert(decode(wire.data(), wire.size(), &decoded) && same_run(decoded, stalker));
+    assert(decoded.bite.serial == 1 && decoded.bite.victim == stalker.host && decoded.bite.damage == 0);
+    assert(!decode(wire.data(), kWireSize, &decoded));
+    assert(!bite_reaches_player(stalker.bite, stalker.host, true, 0.2, 1));
+    auto guest = stalker.host + 1;
+    stalker.bite = {2, guest, 301, 30};
+    assert(encode(stalker, &wire) && decode(wire.data(), wire.size(), &decoded));
+    assert(decoded.bite.victim == guest && decoded.bite.victim_pose == 301 && decoded.bite.damage == 30);
+    assert(new_bite(decoded.bite, 1) && !new_bite(decoded.bite, 2) && !new_bite(decoded.bite, 3));
+    assert(bite_reaches_player(decoded.bite, guest, true, 0.2, 16));
+    assert(!bite_reaches_player(decoded.bite, stalker.host, true, 0.2, 16));
+    assert(!bite_reaches_player(decoded.bite, guest, false, 0.2, 16));
+    assert(!bite_reaches_player(decoded.bite, guest, true, -1, 16));
+    assert(!bite_reaches_player(decoded.bite, guest, true, 1.0, 16));
+    assert(!bite_reaches_player(decoded.bite, guest, true, 0.2, 37));
+    bad = stalker; bad.bite.victim_pose = 0; assert(!valid(bad));
+    bad = stalker; bad.bite.damage = 61; assert(!valid(bad));
+    bad = stalker; bad.bite.victim = stalker.host; assert(!valid(bad));
+    bad = stalker; bad.species = Species::Hoopfish; assert(!valid(bad));
+    assert(!supported_tech(kStalkerTech));
+
     // Slow frames and reordered UDP cannot roll a pending pose backwards.
     Mailbox inbox;
     assert(inbox.push(live));

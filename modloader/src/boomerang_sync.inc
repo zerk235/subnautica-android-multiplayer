@@ -23,6 +23,11 @@ struct BoomerangReplica {
     Vector3 last_written{};
     float maximum_drift = 0, maximum_error = 0, interval_drift = 0;
     uint32_t corrections = 0;
+    uint32_t last_bite = 0;
+    fish_motion::Bite pending_bite{};
+    Vector3 bite_position{};
+    double bite_received_at = 0;
+    double bite_animation_until = 0;
     double next_bind = 0, next_validate = 0, created = 0;
     std::vector<BoomerangSaved> behaviours;
     std::vector<BoomerangSaved> renderers;
@@ -37,6 +42,16 @@ struct HostFishSample {
     void* waterpark = nullptr;
     void* pickup = nullptr;
 };
+bool resolve_stalker_attack();
+void* stalker_type();
+void add_stalker_behaviours(void* go, std::vector<BoomerangSaved>& behaviours);
+void reset_stalker_attacks();
+void stalker_host_tick(const HostFishSample& sample, const LocalState& local,
+                       const PeerState* peers, size_t count, Vector3 position, double now,
+                       fish_motion::Message& pose);
+void stalker_guest_tick(BoomerangReplica& replica, const LocalState& local,
+                        double now, bool visible);
+
 struct BoomerangSync {
     bool runtime_ready = false;
     Entry<bool (*)(void*, void**, void*)> find_identifier;
@@ -53,6 +68,7 @@ struct BoomerangSync {
     void* mono_type = nullptr;
     void* peeper_type = nullptr;
     void* bladderfish_type = nullptr;
+    void* hoopfish_type = nullptr;
     Entry<PredicateFn> peeper_hero, peeper_born_hero, peeper_in_prison;
     ManagedRoot staging;
     ManagedRoot advertised_roots;
@@ -113,6 +129,10 @@ bool resolve_boomerang_sync() {
         if (auto* bladderfish = build_class("Bladderfish"))
             sync.bladderfish_type = il2cpp_type_get_object(il2cpp_class_get_type(bladderfish));
     }
+    if (!sync.hoopfish_type) {
+        if (auto* hoopfish = build_class("Hoopfish"))
+            sync.hoopfish_type = il2cpp_type_get_object(il2cpp_class_get_type(hoopfish));
+    }
     if (sync.find_identifier && sync.active && sync.get_renderer && sync.set_renderer &&
         sync.get_collisions && sync.set_collisions && sync.get_interpolation && sync.set_interpolation &&
         sync.set_root_motion && g_anim_get_root_motion && g_animator_type_obj) return true;
@@ -146,6 +166,8 @@ void* synchronized_fish_type(fish_motion::Species species) {
         case fish_motion::Species::Boomerang: return g_creature_probe.fish_type;
         case fish_motion::Species::Peeper: return g_boomerang.peeper_type;
         case fish_motion::Species::Bladderfish: return g_boomerang.bladderfish_type;
+        case fish_motion::Species::Hoopfish: return g_boomerang.hoopfish_type;
+        case fish_motion::Species::Stalker: return stalker_type();
         default: return nullptr;
     }
 }
@@ -177,6 +199,7 @@ bool wild_synchronized_fish(void* fish, void* go, fish_motion::Species species, 
 }
 
 void release_boomerang(BoomerangReplica& replica) {
+    stalker_guest_tick(replica, LocalState{}, 0, false);
     if (!replica.handle) return;
     const auto& sync = g_boomerang;
     if (replica.visual) {
@@ -219,6 +242,7 @@ void release_boomerang(BoomerangReplica& replica) {
 }
 
 void reset_boomerang_sync() {
+    reset_stalker_attacks();
     auto& sync = g_boomerang;
     for (auto& replica : sync.replicas) {
         release_boomerang(replica);
@@ -322,6 +346,8 @@ void bind_boomerang(BoomerangReplica& replica) {
             [component](const auto& saved) { return saved.component == component; }))
             behaviours.push_back({component, g_behaviour_get_enabled.call(component, g_behaviour_get_enabled.method)});
     })) return;
+    if (replica.identity.species == fish_motion::Species::Stalker)
+        add_stalker_behaviours(go, behaviours);
     void* list = probe.components.call(go, g_renderer_type_obj, true, probe.components.method);
     if (!list) return;
     const int count = g_array_get_length.call(list, g_array_get_length.method);
@@ -647,6 +673,8 @@ void publish_boomerangs(const LocalState& local, double now) {
         pose.sequence = sync.sequence;
         pose.position = {pos.x, pos.y, pos.z};
         pose.rotation = {rot.x, rot.y, rot.z, rot.w};
+        if (pose.species == fish_motion::Species::Stalker)
+            stalker_host_tick(sample, local, peers, count, pos, now, pose);
         if (net_creature_probe_send(pose)) {
             ++sent;
             if (now >= sync.next_report) log_boomerang_pose("tx", pose, 0, 0, 0, 0);
@@ -677,7 +705,12 @@ void apply_boomerangs(const LocalState& local, double now) {
         if (!(boomerang_distance_sq(pos, local) <= kBoomerangRange * kBoomerangRange)) continue;
         if (!sync.sequences.accept(pose)) continue;
         auto* match = boomerang_record(pose, now);
-        if (match) match->receiver.accept(pose, now);
+        if (match && match->receiver.accept(pose, now) && fish_motion::new_bite(pose.bite, match->last_bite)) {
+            match->last_bite = pose.bite.serial;
+            match->pending_bite = pose.bite;
+            match->bite_position = pos;
+            match->bite_received_at = now;
+        }
     }
     size_t matched = 0, applied = 0, hidden = 0, visible = 0, visuals = 0, waiting = 0;
     for (auto it = sync.replicas.begin(); it != sync.replicas.end();) {
@@ -750,6 +783,8 @@ void apply_boomerangs(const LocalState& local, double now) {
         g_set_rotation.call(tr, rot, g_set_rotation.method);
         if (replica.visual && !hide && !sync.active.call(replica.visual, sync.active.method))
             g_set_active.call(replica.visual, true, g_set_active.method);
+        if (replica.identity.species == fish_motion::Species::Stalker)
+            stalker_guest_tick(replica, local, now, !hide);
         replica.last_written = g_get_position.call(tr, g_get_position.method);
         replica.written = true;
         replica.maximum_error = std::max(replica.maximum_error,
@@ -797,6 +832,7 @@ void tick_boomerang_sync(const LocalState& local, bool diagnostic) try {
     if (!probe_resolve() || !resolve_boomerang_sync() || !g_renderer_type_obj ||
         !g_unique_identifier_type || !g_unique_get_id || !g_unique_get_class_id ||
         !g_build_set_position || !g_set_rotation) return;
+    resolve_stalker_attack();
     sync.runtime_ready = true;
     const double now = build_now();
     if (host == net_local_id()) publish_boomerangs(local, now);

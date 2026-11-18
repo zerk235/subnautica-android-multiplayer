@@ -29,7 +29,8 @@ void creature_motion_service() {
     }
 }
 void creature_motion_handle_packet(const uint8_t* data,size_t size,const sockaddr_in& addr) {
-    if(size!=sizeof(PacketHeader)+creature_motion::kWireSize)return;
+    if(size!=sizeof(PacketHeader)+creature_motion::kWireSize &&
+       size!=sizeof(PacketHeader)+creature_motion::kStalkerWireSize)return;
     PacketHeader h{};memcpy(&h,data,sizeof(h));if(!header_reserved_zero(h))return;
     creature_motion::Message m;if(!creature_motion::decode(data+sizeof(h),size-sizeof(h),&m))return;
     const auto session=geometry_session();creature_motion::Id id{};memcpy(id.data(),session.id,16);
