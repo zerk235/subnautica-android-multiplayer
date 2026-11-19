@@ -1,9 +1,9 @@
 # Установщик прямо на Android
 
 **SN Multiplayer Installer** добавляет мультиплеер к вашей установленной копии
-Subnautica на Android. APK установщика с лобби доступен на
-[странице тестового релиза](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-coop-preview). На странице релиза
-выберите файл **snmp-installer-preview.apk** в блоке **Assets**.
+Subnautica на Android. В этой инструкции описана тестовая сборка с лобби.
+Для публичной демоверсии с протоколом 37 используйте
+[инструкцию из её релиза](https://github.com/zerk235/subnautica-android-multiplayer/blob/v0.3.13-installer-preview/docs/INSTALLER.md).
 
 ## Быстрый старт
 

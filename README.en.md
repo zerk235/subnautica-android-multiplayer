@@ -10,10 +10,6 @@ This repository contains mod/installer source and tests, not the game or a prepa
 
 ## Download and install
 
-The co-op preview adds an in-game lobby, a redesigned patcher, and shared waterproof lockers. Install the protocol **45** mod on both phones. The patcher version is **0.3.13-coop-preview**. [Download the co-op preview APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-coop-preview/snmp-installer-preview.apk) · [Release notes and SHA-256 (Russian)](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-coop-preview).
-
-The previous demo uses protocol **37** and is still available below.
-
 **[Download installer 0.3.13 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-preview)
 
 **0.3.13 adds experimental Bladderfish sync and improves guest fish pickup.** The installer supports game resources stored inside base.apk.
