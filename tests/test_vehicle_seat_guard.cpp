@@ -34,8 +34,10 @@ bool component_guid(void*,uint8_t out[16]) {
 }
 void* get_game_object(void* component,void*){return component;}
 Entry<void* (*)(void*,void*)> g_get_game_object{get_game_object,nullptr};
-struct DrivenVehicle {bool used=false;char classId[16]{};void* game_object=nullptr;uint8_t guid[16]{};};
+struct DrivenVehicle {bool used=false;char classId[16]{};void* game_object=nullptr;};
 DrivenVehicle g_driven[4];
+int restores=0;
+void release_driven(DrivenVehicle* driven,const char*) {driven->used=false;++restores;}
 void* cached_managed_string(const char* text){return const_cast<char*>(text);}
 int clicks=0,enters=0,messages=0,writes=0;
 void original_click(void*,void*,void*){++clicks;}
@@ -115,28 +117,25 @@ int main() {
     assert(!patch_managed_vtable_slot(&wrong,&click_method,6,reinterpret_cast<void*>(&hooked_seamoth_hand_click),&original));
     assert(!original&&writes==2); // unknown dispatch/layout is never overwritten
 
-    // Live failure: the visible prefab has a different local GUID from the
-    // host's vehicle. Resolve only the exact tracked object to its wire GUID.
+    // Only a vehicle with the shared native ID is occupied by the remote pilot.
     session=kSessionHost;native_guid=2;
     remote.updated=peer.last_seen=clock_now;
     peer.flags=kFlagPiloting;
     hooked_seamoth_hand_click(&moth,nullptr,&click_method);
     assert(clicks==5); // genuinely different native vehicle remains available
     g_driven[0].used=true;g_driven[0].game_object=&moth;
-    memcpy(g_driven[0].classId,"SeaMoth",8);g_driven[0].guid[0]=1;
-    lookup_throws=true; // the replica path must not depend on its native GUID
+    memcpy(g_driven[0].classId,"SeaMoth",8);
+    native_guid=1;
     hooked_seamoth_hand_click(&moth,nullptr,&click_method);
     hooked_seamoth_enter(&moth,nullptr,true,false,&enter_method);
-    assert(clicks==5&&enters==2);
-    lookup_throws=false;
+    assert(clicks==5&&enters==2&&restores==0&&g_driven[0].used);
+
+    peer.flags=0;peer.sequence=104;
     g_driven[0].game_object=&base;
-    hooked_seamoth_hand_click(&moth,nullptr,&click_method);
-    assert(clicks==6); // nearby / other object is never blocked by association
-    g_driven[0].game_object=&moth;g_driven[0].used=false;
-    hooked_seamoth_hand_click(&moth,nullptr,&click_method);
-    assert(clicks==7); // unused tracking records do not claim a seat
-    g_driven[0].used=true;peer.flags=0;peer.sequence=104;
-    hooked_seamoth_hand_click(&moth,nullptr,&click_method);
-    assert(clicks==8); // explicit exit releases even a still-tracked replica
+    hooked_seamoth_enter(&moth,nullptr,true,false,&enter_method);
+    assert(enters==3&&restores==0&&g_driven[0].used); // do not release another vehicle
+    g_driven[0].game_object=&moth;
+    hooked_seamoth_enter(&moth,nullptr,true,false,&enter_method);
+    assert(enters==4&&restores==1&&!g_driven[0].used); // restore physics during local entry
     puts("actual vehicle seat hooks: SeaMoth-only dispatch, both admission paths, exit, message failure and unknown-slot safety passed");
 }

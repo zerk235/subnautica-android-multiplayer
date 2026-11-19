@@ -20,6 +20,7 @@
 #include "log.h"
 #include "world.h"
 #include "connection_check.h"
+#include "menu_lobby.h"
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
 #include "base_geometry_reliable.h"
 #endif
@@ -168,7 +169,7 @@ struct StatePacket {
     HeldOffset held_offset;
 };
 
-// Piloted-vehicle pose. Packed like every other packet; 72 bytes on the wire.
+// Piloted-vehicle pose and the canonical Seamoth identifier.
 struct VehiclePacket {
     PacketHeader header;
     uint32_t id;
@@ -177,6 +178,7 @@ struct VehiclePacket {
     char classId[16];  // vehicle prefab class id; the receiver clones from it when the guid
                        // has no local match (separate saves mean the pilot's sub does not
                        // exist on the peer until it is spawned here)
+    char object_id[kVehicleObjectIdSize];
     float x, y, z;
     float yaw, pitch, roll;
 };
@@ -355,6 +357,7 @@ struct SessionPresencePacket {
     // v4: the sender's current offer generation (host) or the offer generation it has
     // adopted (guest that already received a world); 0 while worldless.
     uint32_t world_gen;
+    menu_lobby::Presence lobby;
 };
 
 struct JoinRequestPacket {
@@ -398,7 +401,7 @@ struct SessionLeavePacket {
 static_assert(sizeof(PacketHeader) == 8, "header");
 static_assert(sizeof(HelloPacket) == 16, "hello");
 static_assert(sizeof(StatePacket) == 172, "state with interior identity and held tool world pose");
-static_assert(sizeof(VehiclePacket) == 72, "vehicle");
+static_assert(sizeof(VehiclePacket) == 72 + kVehicleObjectIdSize, "vehicle");
 static_assert(sizeof(WorldRequestPacket) == 12, "world request");
 static_assert(sizeof(WorldManifestPacket) == 244, "manifest with saved entity cells");
 static_assert(sizeof(WorldChunkPacket) == 1048, "chunk");
@@ -419,7 +422,7 @@ static_assert(sizeof(WorldEventPacket) == sizeof(WorldEvent) + 40, "event wire m
 static_assert(sizeof(WorldEventAckPacket) == 48, "event ack");
 static_assert(sizeof(WorldEventStatusPacket) == 48, "event stream status");
 static_assert(sizeof(TimePacket) == 24, "time");
-static_assert(sizeof(SessionPresencePacket) == 165, "session presence");
+static_assert(sizeof(SessionPresencePacket) == 181, "session presence");
 static_assert(sizeof(JoinRequestPacket) == 48, "join request");
 static_assert(sizeof(JoinReplyPacket) == 52, "join reply");
 static_assert(sizeof(SessionLeavePacket) == 40, "session leave");
@@ -626,6 +629,7 @@ const char* event_kind_name(uint8_t kind) {
         case kWorldEventLockerContents: return "locker-contents";
         case kWorldEventFishPickup: return "fish-pickup";
         case kWorldEventSharedProgress: return "shared-progress";
+        case kWorldEventLockerMotion: return "locker-motion";
         default: return "event";
     }
 }
@@ -636,7 +640,8 @@ bool event_kind_known(uint8_t kind) {
     return kind == kWorldEventPickup || kind == kWorldEventDrop ||
            kind == kWorldEventBuild || kind == kWorldEventProgress ||
            kind == kWorldEventRemove || kind == kWorldEventLockerContents ||
-           kind == kWorldEventFishPickup || kind == kWorldEventSharedProgress;
+           kind == kWorldEventFishPickup || kind == kWorldEventSharedProgress ||
+           kind == kWorldEventLockerMotion;
 }
 
 struct EventSlot {
@@ -1026,6 +1031,7 @@ struct RemotePresence {
     char game_build[kGameBuildCapacity];  // e.g. "1.22.83315"; compared exactly
     char mod_version[kModVersionCapacity];  // 40-char git hash; compared exactly
     double last_presence;                   // pump timestamp of the last valid packet
+    menu_lobby::Presence lobby;
     bool join_accepted;  // WE accepted this peer's join (host side): its world requests
                          // are served and its events/state are synced
     // Host-issued admission survives reordered pre-JOIN presence packets. Bind it to
@@ -1131,6 +1137,15 @@ struct LocalSession {
 };
 
 LocalSession g_session = {PTHREAD_MUTEX_INITIALIZER};
+struct LocalLobby {
+    menu_lobby::Presence presence;
+    SessionLaunchRole previous_role;
+    bool open;
+    bool entered_world;
+    bool room_lost;
+};
+// Protected by the session lock. Read remote entries while holding the peer lock first.
+LocalLobby g_lobby{};
 
 // The published offer is a cache, not the authority. A role flicker between save ticks clears
 // it via net_offer_world(nullptr), and the next save tick may only republish seconds later -
@@ -1485,6 +1500,7 @@ bool local_session_copy(SessionPresencePacket* packet, uint8_t* local_flags_out 
     if (g_session.local_member && g_session.content_guid_valid)
         memcpy(packet->content_guid, g_session.content_guid, sizeof(packet->content_guid));
     snprintf(packet->slot, sizeof(packet->slot), "%s", g_session.slot);
+    packet->lobby = g_lobby.presence;
     pthread_mutex_unlock(&g_session.lock);
     // Offer generation out of the session guard on purpose: lock order elsewhere is
     // session -> offer (rebuild_offer_from_disk takes session, then offer), matching here.
@@ -1598,6 +1614,7 @@ void send_vehicle(const PeerState& peer, const VehicleState& vehicle) {
     packet.sequence = ++g_next_sequence;
     memcpy(packet.guid, vehicle.guid, sizeof(packet.guid));
     memcpy(packet.classId, vehicle.classId, sizeof(packet.classId));
+    memcpy(packet.object_id, vehicle.object_id, sizeof(packet.object_id));
     packet.x = vehicle.x;
     packet.y = vehicle.y;
     packet.z = vehicle.z;
@@ -2042,7 +2059,8 @@ void handle_presence_locked(const uint8_t* data, size_t size,
         (packet.flags & ~(kSessionFlagIsHost | kSessionFlagHasWorld | kSessionFlagMember)) != 0 ||
         !fixed_string_zero_padded(packet.slot, sizeof(packet.slot)) ||
         !fixed_string_zero_padded(packet.game_build, sizeof(packet.game_build)) ||
-        !fixed_string_zero_padded(packet.mod_version, sizeof(packet.mod_version))) {
+        !fixed_string_zero_padded(packet.mod_version, sizeof(packet.mod_version)) ||
+        !menu_lobby::valid(packet.lobby, packet.sender_id)) {
         return;
     }
     if (packet.protocol_version != kSessionProtocolVersion) {
@@ -2102,6 +2120,7 @@ void handle_presence_locked(const uint8_t* data, size_t size,
     memcpy(remote.game_build, packet.game_build, sizeof(remote.game_build));
     memcpy(remote.mod_version, packet.mod_version, sizeof(remote.mod_version));
     remote.last_presence = now;
+    remote.lobby = packet.lobby;
     remote.join_accepted = was_join_accepted;
     memcpy(remote.admitted_session, admitted_session, sizeof(remote.admitted_session));
     remote.admitted_epoch = admitted_epoch;
@@ -2187,9 +2206,14 @@ void handle_join_request_locked(const uint8_t* data, size_t size,
     uint8_t current_guid[16]{};
     char current_slot[24]{};
     bool host_available = false;
+    bool lobby_allowed = true;
     pthread_mutex_lock(&g_session.lock);
     host_available = g_session.active && g_session.local_host && g_session.local_has_world &&
                      g_session.local_member;
+    const auto& lobby = g_lobby.presence;
+    if (lobby.room && lobby.host == g_local_id) {
+        lobby_allowed = menu_lobby::can_join_world(lobby, remote.lobby, request.sender_id);
+    }
     current_epoch = g_session.epoch;
     memcpy(current_session, g_session.session_id, sizeof(current_session));
     memcpy(current_guid, g_session.content_guid, sizeof(current_guid));
@@ -2216,6 +2240,8 @@ void handle_join_request_locked(const uint8_t* data, size_t size,
     } else if (!same_session(request.session_id, current_session) ||
                request.session_epoch != current_epoch) {
         status = kJoinStaleSession;
+    } else if (!lobby_allowed) {
+        status = kJoinBusy;
     } else if (remote.flags & kSessionFlagHasWorld) {
         status = kJoinGuestInGame;
     } else {
@@ -2607,10 +2633,14 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
         }
     }
 
-    if (header.type == kPacketVehicle && size >= sizeof(VehiclePacket)) {
+    if (header.type == kPacketVehicle && size == sizeof(VehiclePacket)) {
         VehiclePacket packet{};
         memcpy(&packet, data, sizeof(packet));
-        if (packet.id != g_local_id) {
+        if (packet.id != g_local_id &&
+            memchr(packet.classId, '\0', sizeof(packet.classId)) &&
+            memchr(packet.object_id, '\0', sizeof(packet.object_id)) &&
+            isfinite(packet.x) && isfinite(packet.y) && isfinite(packet.z) &&
+            isfinite(packet.yaw) && isfinite(packet.pitch) && isfinite(packet.roll)) {
             int peer_index = peer_index_by_id(packet.id);
             if (peer_index < 0 ||
                 !session_peer_eligible_locked(static_cast<size_t>(peer_index), true)) {
@@ -2646,6 +2676,7 @@ void handle_packet(const uint8_t* data, size_t size, const struct sockaddr_in& a
                     memcpy(g_vehicles[slot].guid, packet.guid, sizeof(g_vehicles[slot].guid));
                     memcpy(g_vehicles[slot].classId, packet.classId,
                            sizeof(g_vehicles[slot].classId));
+                    memcpy(g_vehicles[slot].object_id, packet.object_id, sizeof(packet.object_id));
                     g_vehicles[slot].x = packet.x;
                     g_vehicles[slot].y = packet.y;
                     g_vehicles[slot].z = packet.z;
@@ -2699,7 +2730,7 @@ void session_auto_join_tick(double now) {
     // transfer when the bytes match, and a newer host generation flows through the
     // refresh path. Blocking the join while the world was live left the phone in a
     // sessionless forever-state with no pose/event sync - the live bug of 2026-10-25.
-    bool eligible = g_session.launch_role!=kLaunchHost && !g_session.explicit_leave &&
+    bool eligible = !g_lobby.open && g_session.launch_role!=kLaunchHost && !g_session.explicit_leave &&
                     !g_session.active && !g_session.local_member && !g_session.selected &&
                     !g_session.join_request_pending && !g_session.join_accepted &&
                     !g_session.local_has_world && !g_session.local_host &&
@@ -2720,7 +2751,7 @@ void session_auto_join_tick(double now) {
         const RemotePresence& remote = g_remote[i];
         if (!g_peers[i].active || !remote.valid || !remote.protocol_v3 ||
             now - remote.last_presence > kPeerTimeout ||
-            !(remote.flags & kSessionFlagIsHost) ||
+            !(remote.flags & kSessionFlagIsHost) || remote.lobby.room ||
             !bytes_nonzero(remote.session_id, sizeof(remote.session_id)) ||
             !bytes_nonzero(remote.content_guid, sizeof(remote.content_guid)) ||
             strcmp(remote.game_build, kGameBuild) != 0 ||
@@ -2754,7 +2785,7 @@ void session_auto_join_tick(double now) {
     // Re-check under the lock: an explicit join may have landed meanwhile.
     if (!g_session.active && !g_session.local_member && !g_session.selected &&
         !g_session.join_request_pending && !g_session.join_accepted &&
-        g_session.launch_role!=kLaunchHost && !g_session.explicit_leave &&
+        !g_lobby.open && g_session.launch_role!=kLaunchHost && !g_session.explicit_leave &&
         !g_session.local_has_world && !g_session.local_host &&
         (!g_session.world_active || g_session.resume_host_slot) &&
         now >= g_session.leave_cooldown_until && now >= g_session.join_retry_after) {
@@ -2772,7 +2803,7 @@ void session_auto_join_tick(double now) {
         g_session.reason = kJoinAccepted;
         session_set_state_locked(kSessionJoinPending, kJoinAccepted, "auto-join visible host");
         push_world_notice(WorldNotice::HostFound);
-        LOG_INFO("session: auto-joining host %08x (no UI yet; explicit join overrides)",
+        LOG_INFO("session: auto-joining legacy host %08x",
                  best_host);
     }
     pthread_mutex_unlock(&g_session.lock);
@@ -3502,7 +3533,8 @@ void net_post_world_event(const WorldEvent& event, bool already_applied) {
 
 bool net_try_post_world_event(const WorldEvent& event) {
     return (event.kind==kWorldEventLockerContents || event.kind==kWorldEventFishPickup ||
-            event.kind==kWorldEventSharedProgress) && queue_local_event(event,true);
+            event.kind==kWorldEventSharedProgress || event.kind==kWorldEventLockerMotion) &&
+           queue_local_event(event,true);
 }
 uint32_t net_session_host_id() {
     pthread_mutex_lock(&g_session.lock);
@@ -3834,6 +3866,7 @@ void net_session_leave() {
 
 #include "session_world_context.inc"
 #include "session_launch_role.inc"
+#include "menu_lobby.inc"
 
 #include "session_local_world.inc"
 

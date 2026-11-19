@@ -61,6 +61,7 @@ target_link_options(shadowhook_static PRIVATE -Wl,-z,max-page-size=16384)
 add_library(snmod SHARED
     src/main.cpp
     src/launch_role_bridge.cpp
+    src/lobby_ui_bridge.cpp
     src/log.cpp
     src/hooks.cpp
     src/il2cpp_api.cpp
@@ -74,6 +75,11 @@ target_include_directories(snmod PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_compile_definitions(snmod PRIVATE MOD_VERSION="${SNMOD_GIT_HASH}")
+set(SNMOD_LOBBY_INCLUDE "" CACHE PATH "Directory containing the compiled Android lobby DEX header")
+if(SNMOD_LOBBY_INCLUDE)
+    target_include_directories(snmod PRIVATE "${SNMOD_LOBBY_INCLUDE}")
+    target_compile_definitions(snmod PRIVATE SNMOD_LOBBY_UI)
+endif()
 
 target_link_libraries(snmod PRIVATE
     shadowhook_static

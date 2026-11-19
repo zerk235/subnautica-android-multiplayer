@@ -3,6 +3,7 @@ package io.github.zerk235.snmp.installer;
 import android.app.*;
 import android.content.*;
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageInfo;
 import android.os.*;
 import org.json.JSONObject;
 import java.io.*;
@@ -16,7 +17,12 @@ public final class PatchService extends Service {
     public IBinder onBind(Intent intent) { return null; }
 
     static void status(Context context, String message) {
-        context.getSharedPreferences("status", 0).edit().putString("message", message).apply();
+        status(context, message, 0, 0);
+    }
+
+    private static void status(Context context, String message, long done, long total) {
+        context.getSharedPreferences("status", 0).edit().putString("message", message)
+            .putLong("progressDone", done).putLong("progressTotal", total).apply();
         Diagnostics.progress(context,message);
     }
 
@@ -31,6 +37,7 @@ public final class PatchService extends Service {
         startForeground(1, notification("Подготовка…"));
         final String action=intent==null?"prepare":intent.getAction();
         Diagnostics.begin(this,action);
+        status(this, "Запуск операции…");
         new Thread(() -> {
             PowerManager.WakeLock wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SNMP:prepare");
             try {
@@ -41,7 +48,7 @@ public final class PatchService extends Service {
                     if (now - lastReport < 750 && done != 0) return;
                     lastReport = now;
                     String text = total > 0 ? stage + " · " + Math.min(100, done * 100 / total) + "%" : stage;
-                    status(this, text);
+                    status(this, text, done, total);
                     getSystemService(NotificationManager.class).notify(1, notification(text));
                 };
                 if("diagnostics".equals(action)) {
@@ -72,19 +79,23 @@ public final class PatchService extends Service {
                     status(this,"Восстановление миров. Игра будет остановлена…");
                     JSONObject report=new SaveManager(this).restore();
                     status(this,"Миры восстановлены: "+report.getInt("files")+" файлов, SHA256 совпал. Можно открывать игру. Прежняя папка и резервная копия сохранены.");
-                } else if("check-removal".equals(action)) {
-                    getSharedPreferences("status",0).edit().remove("removalToken").commit();
-                    String identity = new SaveManager(this).checkRemoval(progress);
+                } else if ("check-removal".equals(action) || "check-removal-without-backup".equals(action)) {
+                    boolean discardWorlds = "check-removal-without-backup".equals(action);
+                    getSharedPreferences("status", 0).edit().remove("removalToken").commit();
+                    String identity = discardWorlds ? checkRemovalWithoutBackup(engine, progress)
+                        : new SaveManager(this).checkRemoval(progress);
                     getSharedPreferences("status",0).edit().putString("removalToken",intent.getStringExtra("token"))
                         .putString("removalIdentity",identity)
+                        .putBoolean("removalDiscardsWorlds", discardWorlds)
                         .putLong("removalReadyAt",SystemClock.elapsedRealtime()).apply();
-                    status(this,"APK и актуальная копия миров проверены. Подтвердите удаление старой игры в системном окне.");
+                    status(this, discardWorlds ? "APK проверены. Android запросит подтверждение удаления игры и её миров."
+                        : "APK и актуальная копия миров проверены. Подтвердите удаление старой игры в системном окне.");
                 }
                 else {
-                    engine.prepare(progress);
-                    if(engine.plan().getBoolean("full") && SaveBridge.readiness()==null && !new SaveManager(this).needsRestore()) {
-                        status(this,"APK готовы. Копирование миров и проверка SHA256…");
-                        new SaveManager(this).backup();
+                    if ("prepare-experimental".equals(action)) {
+                        engine.prepare(progress, intent.getStringExtra("acceptedVersion"), intent.getLongExtra("acceptedCode", -1));
+                    } else {
+                        engine.prepare(progress);
                     }
                     String blocker = engine.installBlocker(engine.plan());
                     status(this, blocker == null ? "Файлы готовы. Можно устанавливать мод." : "Файлы готовы.\n\n" + blocker);
@@ -99,6 +110,29 @@ public final class PatchService extends Service {
             }
         }, "snmp-prepare").start();
         return START_NOT_STICKY;
+    }
+
+    String checkRemovalWithoutBackup(PatchEngine engine, ApkPatcher.Progress progress) throws Exception {
+        JSONObject plan = engine.plan();
+        PackageInfo game = engine.installed();
+        String blocked = engine.removalBlocker(plan);
+        if (blocked != null) throw new IOException(blocked);
+        String identity = PatchEngine.removalIdentity(game);
+        boolean profilesVerified = false;
+        if (SaveBridge.readiness() == null) {
+            try (SaveBridge bridge = new SaveBridge(this)) {
+                bridge.call(SaveAccessService.CHECK_PROFILES, null, false);
+                profilesVerified = true;
+            } catch (SaveBridge.UnavailableException unavailable) {
+                Diagnostics.event(this, "shizuku_profile_check_unavailable", unavailable.getMessage());
+            }
+        }
+        if (!profilesVerified && getSystemService(UserManager.class).getUserProfiles().size() != 1) {
+            throw new IOException("Для замены при нескольких профилях Android нужна проверка через Shizuku");
+        }
+        engine.verifyPlan(plan, progress);
+        if (!identity.equals(engine.removalIdentity())) throw new IOException("Игра изменилась во время проверки");
+        return identity;
     }
 
     Notification notification(String text) {
@@ -121,7 +155,10 @@ public final class PatchService extends Service {
         List<File> files = engine.verifyPlan(plan, progress);
         blocker = engine.installBlocker(plan); if (blocker != null) throw new IOException(blocker);
         // If a migration backup exists, verify it before installing into the now-absent game slot.
-        if(engine.installed()==null && new SaveManager(this).latest()!=null) new SaveManager(this).verify();
+        boolean discardWorlds = PatchEngine.targetIdentity(plan).equals(
+            getSharedPreferences("status", 0).getString(SaveManager.SKIP_RESTORE_TARGET, ""));
+        if (engine.installed() == null && !discardWorlds && new SaveManager(this).latest() != null)
+            new SaveManager(this).verify();
         commitInstall(files, false, progress);
     }
 

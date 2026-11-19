@@ -7,6 +7,19 @@
 
 namespace item_drop_sync {
 
+constexpr int32_t kGravTrap = 758;
+constexpr int32_t kWaterproofLocker = 759;
+constexpr int32_t kVehicleBay = 752;
+// For a Vehicle Bay drop, build_flags carries its native deployed state.
+constexpr uint8_t kBayDeployed = 1;
+// A locker snapshot may create the missing replica. It does not move or reactivate a known object.
+constexpr uint8_t kLockerEnsurePresent = 1;
+
+inline bool locker_presence(const WorldEvent& event) {
+    return event.kind == kWorldEventDrop && event.tech_type == kWaterproofLocker &&
+           event.build_flags == kLockerEnsurePresent;
+}
+
 // Materials whose prefab can recreate the dropped item in Android 1.22.83315.
 // Charged tools and other items with instance state require native serialization.
 inline bool plain_resource(int32_t tech) {
@@ -48,19 +61,47 @@ inline bool plain_resource(int32_t tech) {
     }
 }
 
-inline bool has_resource_identity(const WorldEvent& event) {
-    return (event.kind == kWorldEventPickup || event.kind == kWorldEventDrop) &&
-           plain_resource(event.tech_type) && event.object_id[0] &&
+inline bool deployable_item(int32_t tech) {
+    return tech == kGravTrap || tech == kWaterproofLocker || tech == kVehicleBay;
+}
+
+inline bool vehicle_bay_deployed(const WorldEvent& event) {
+    return event.kind == kWorldEventDrop && event.tech_type == kVehicleBay &&
+           (event.build_flags & kBayDeployed) != 0;
+}
+
+inline bool replicable_item(int32_t tech) {
+    return plain_resource(tech) || deployable_item(tech);
+}
+
+inline bool has_object_id(const WorldEvent& event) {
+    return event.object_id[0] &&
            std::memchr(event.object_id, '\0', sizeof(event.object_id));
 }
 
-inline bool valid_spawn(const WorldEvent& event) {
-    if (event.kind != kWorldEventDrop || !has_resource_identity(event)) return false;
+inline bool has_item_identity(const WorldEvent& event) {
+    return (event.kind == kWorldEventPickup || event.kind == kWorldEventDrop) &&
+           replicable_item(event.tech_type) && has_object_id(event);
+}
+
+inline bool valid_pose(const WorldEvent& event) {
     const float rotation_length = event.qx * event.qx + event.qy * event.qy +
                                   event.qz * event.qz + event.qw * event.qw;
     return rotation_length > 0.95f && rotation_length < 1.05f &&
            std::isfinite(event.x) && std::isfinite(event.y) && std::isfinite(event.z) &&
            std::isfinite(event.vx) && std::isfinite(event.vy) && std::isfinite(event.vz);
+}
+
+inline bool valid_spawn(const WorldEvent& event) {
+    return event.kind == kWorldEventDrop && has_item_identity(event) && valid_pose(event);
+}
+
+constexpr uint8_t kLockerMoving = 1;
+
+inline bool valid_locker_motion(const WorldEvent& event) {
+    return event.kind == kWorldEventLockerMotion && event.tech_type == kWaterproofLocker &&
+           (event.build_flags == 0 || event.build_flags == kLockerMoving) &&
+           has_object_id(event) && valid_pose(event);
 }
 
 inline bool near_drop(const WorldEvent& event, float x, float y, float z) {
@@ -74,7 +115,8 @@ inline bool near_drop(const WorldEvent& event, float x, float y, float z) {
 inline bool supersedes(const WorldEvent& incoming, const WorldEvent& pending) {
     // The game receives events in order per origin. A retry must not replay an
     // older pickup or drop once a newer action for the same object has landed.
-    return std::memcmp(incoming.guid, pending.guid, sizeof(incoming.guid)) == 0;
+    return !locker_presence(incoming) &&
+           std::memcmp(incoming.guid, pending.guid, sizeof(incoming.guid)) == 0;
 }
 
 } // namespace item_drop_sync

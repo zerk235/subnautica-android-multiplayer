@@ -21,15 +21,19 @@ struct ContentsApi {
     Entry<uint8_t (*)(void*,void*,void*)> room;
     Entry<void (*)(void*,void*,int32_t,void*)> array_set;
     Entry<void (*)(void*,void*,void*)> click;
+    Entry<void (*)(void*,void*,void*)> waterproof_pickup_click;
     Entry<void (*)(void*,void*)> notify;
     Entry<uint8_t (*)(void*,void**,void*)> deconstruct;
     void* roots=nullptr;
+    void* waterproof_pickup_field=nullptr;
+    void* storage_root_field=nullptr;
 } g_contents_api;
 ContentsAddFn g_contents_add_original=nullptr;
 ContentsRemoveFn g_contents_remove_original=nullptr;
 ContentsAllowFn g_contents_allowed_remove_original=nullptr;
 using ContentsClickFn=void (*)(void*,void*,void*);
 ContentsClickFn g_contents_click_original=nullptr;
+ContentsClickFn g_waterproof_pickup_click_original=nullptr;
 using ContentsDeconstructFn=uint8_t (*)(void*,void**,void*);
 ContentsDeconstructFn g_contents_deconstruct_original=nullptr;
 bool g_contents_internal=false;
@@ -37,7 +41,7 @@ struct ContentsLocal {
     lc::Authority authority;
     bool initialized=false,ready=false,repairing=false,want_open=false;
     uint64_t revision=0;
-    void* hand=nullptr;
+    ManagedRoot hand;
     std::vector<lc::Item> manifest;
     double next_query=0,next_reactor_refresh=0;
 };
@@ -139,8 +143,15 @@ void* contents_constructable(const std::string& id) {
     return build_find(e);
 }
 constexpr char kPodStorageId[] = "SNMP:EscapePod";
+void* contents_waterproof_storage(void* pickup) {
+    void* go = waterproof_world_object(pickup);
+    if (!go) return nullptr;
+    return build_locker_storage(go, true);
+}
+
 void* contents_locker(const std::string& id) {
     if (id == kPodStorageId) return shared_pod_storage();
+    if (void* pickup = waterproof_find(id.c_str())) return contents_waterproof_storage(pickup);
     void* c=contents_constructable(id);WorldEvent check{};
     if(contents_build_type(c)!=interior_build::kLocker||!build_attached_capture(c,&check))return nullptr;
     return build_locker_storage(g_get_game_object.call(c,g_get_game_object.method),true);
@@ -164,11 +175,7 @@ void* contents_container(const std::string& id,bool* is_reactor=nullptr) {
         if(!build_live(contents_field(reactor,api.storage_root)))return nullptr;
         return api.get_container.call(reactor,api.get_container.method);
     }
-    void* c=contents_constructable(id);
-    if(contents_build_type(c)!=interior_build::kLocker)return nullptr;
-    WorldEvent check{};if(!build_attached_capture(c,&check))return nullptr;
-    void* go=g_get_game_object.call(c,g_get_game_object.method);
-    return contents_field(build_locker_storage(go,true),g_locker_api.container_field);
+    return contents_field(contents_locker(id),g_locker_api.container_field);
 }
 void* contents_inventory() {
     void* inv=read_static_object_field(g_inventory_class,"main");
@@ -195,6 +202,13 @@ bool contents_parent(void* container,std::string* id,bool* is_reactor=nullptr) {
     void* go=transform?g_get_game_object.call(transform,g_get_game_object.method):nullptr;
     bool found=false;
     walk_parents(go,[&](void* node){
+        if (void* pickup = waterproof_pickup(node)) {
+            void* storage = contents_waterproof_storage(pickup);
+            if (contents_field(storage, g_locker_api.container_field) == container) {
+                found = contents_id(pickup, id);
+                return true;
+            }
+        }
         if(g_bioreactor_api.ready) {
             void* reactor=g_get_component.call(node,g_bioreactor_api.type,g_get_component.method);
             if(build_live(reactor)&&contents_field(reactor,g_bioreactor_api.container)==container) {
@@ -210,6 +224,17 @@ bool contents_parent(void* container,std::string* id,bool* is_reactor=nullptr) {
         *id=check.object_id;
         found=true;return true;
     });return found;
+}
+
+bool contents_storage_id(void* storage, std::string* id) {
+    void* container = contents_field(storage, g_locker_api.container_field);
+    if (!container) return false;
+    // The game's storage points at the prefab root even if its hand target and
+    // ItemsContainer transform live on different child objects.
+    void* root = contents_field(storage, g_contents_api.storage_root_field);
+    if (void* pickup = waterproof_pickup(root); pickup && contents_waterproof_storage(pickup) == storage)
+        return contents_id(pickup, id);
+    return contents_parent(container, id);
 }
 struct ContentsNativeItem {lc::Item state;void* inventory_item=nullptr;void* pickup=nullptr;};
 bool contents_items(void* container,std::vector<ContentsNativeItem>* out) {
@@ -398,15 +423,34 @@ uint8_t contents_allow_remove_hook(void* self,void* pickup,uint8_t verbose,void*
 }
 void contents_click_hook(void* storage,void* hand,void* method) {
     if(!g_contents_api.ready||!contents_world_ready()){g_contents_click_original(storage,hand,method);return;}
-    std::string id;void* container=contents_field(storage,g_locker_api.container_field);
-    if(!contents_parent(container,&id)){g_contents_click_original(storage,hand,method);return;}
+    std::string id;
+    if(!contents_storage_id(storage,&id)){g_contents_click_original(storage,hand,method);return;}
     if(g_contents_api.failed){contents_notify("SNMP: перенос вещей остановлен; сохрани отчёт диагностики.");return;}
     if(g_local_is_host){
         if(contents_baseline(id)&&!g_contents_lockers[id].authority.reserved)g_contents_click_original(storage,hand,method);
         else contents_notify("SNMP: шкаф занят переносом другого игрока.");
         return;
     }
-    auto& local=g_contents_lockers[id];local.want_open=true;local.hand=hand;local.ready=false;contents_query(id);
+    auto& local=g_contents_lockers[id];
+    if (!prefab_retain(local.hand, hand)) return;
+    local.want_open=true;local.ready=false;contents_query(id);
+}
+
+void contents_waterproof_pickup_click(void* target, void* hand, void* method) {
+    void* pickup = contents_field(target, g_contents_api.waterproof_pickup_field);
+    std::string id;
+    if (contents_world_ready() && contents_waterproof_storage(pickup) && contents_id(pickup, &id)) {
+        if (contents_locker_busy(id.c_str()) || g_waterproof_remote.count(id)) {
+            contents_notify("SNMP: контейнер занят другим игроком.");
+            return;
+        }
+        if (!g_local_is_host && !g_contents_lockers[id].ready) {
+            contents_query(id);
+            contents_notify("SNMP: содержимое обновляется. Повтори попытку через секунду.");
+            return;
+        }
+    }
+    g_waterproof_pickup_click_original(target, hand, method);
 }
 uint8_t contents_deconstruct_hook(void* self,void** reason,void* method) {
     if(contents_world_ready()) {
@@ -444,6 +488,7 @@ bool contents_bind() {
     a.room.bind(build_typed_method(a.items,"HasRoomFor",1,"Pickupable"));
     a.room_tech.bind(build_typed_method(a.items,"HasRoomFor",1,"TechType"));
     a.click.bind(find_method(storage,"OnHandClick",1));
+    a.storage_root_field=build_field_on(storage,"prefabRoot",0x28);
     a.notify.bind(find_method(build_class("ErrorMessage"),"AddMessage",1));
     auto* array=find_class_in_domain("System","Array");
     // SetValue(object, int) is the only two-argument overload with an Int32
@@ -483,12 +528,34 @@ void contents_install() {
     a.hooks=true;LOG_INFO("locker contents: hooks ready ItemsContainer slots=5,6,8 StorageContainer slot=6 StorageObstacle slot=5");
 }
 
+void contents_install_waterproof_pickup() {
+    if (g_waterproof_pickup_click_original) return;
+    auto& a = g_contents_api;
+    auto* klass = build_class("PickupableStorage");
+    a.waterproof_pickup_field = build_field_on(klass, "pickupable", 0x20);
+    a.waterproof_pickup_click.bind(find_method(klass, "OnHandClick", 1));
+    if (!a.waterproof_pickup_field || !a.waterproof_pickup_click) return;
+    uint16_t slot = 0, count = 0;
+    void* entry = base_geometry::completion_vtable_entry(
+        klass, a.waterproof_pickup_click.method, &slot, &count, 5);
+    if (!entry) return;
+    g_waterproof_pickup_click_original = reinterpret_cast<ContentsClickFn>(*static_cast<void**>(entry));
+    if (!write_pointer(entry, reinterpret_cast<void*>(&contents_waterproof_pickup_click))) {
+        g_waterproof_pickup_click_original = nullptr;
+        return;
+    }
+    LOG_INFO("waterproof locker: native pickup guard ready");
+}
+
 void contents_open_ready(const std::string& id) {
     auto& local=g_contents_lockers[id];
     if(!local.ready||local.repairing||g_contents_pending.used)return;
     if(local.want_open){
         void* storage=contents_locker(id);if(!storage)return;
-        local.want_open=false;g_contents_click_original(storage,local.hand,g_contents_api.click.method);
+        local.want_open=false;
+        if (void* hand = local.hand.get(); build_live(hand))
+            g_contents_click_original(storage,hand,g_contents_api.click.method);
+        local.hand.clear();
     }
 }
 void contents_reconcile(const std::string& id) {
@@ -696,6 +763,7 @@ void contents_receive_frame(const WorldEvent& e) {
 void tick_locker_contents(const LocalState& local) try {
     if(!local.valid||!g_build_baseline||!g_role_known)return;
     contents_install();auto& a=g_contents_api;if(!a.hooks||a.failed)return;
+    contents_install_waterproof_pickup();
     if(!g_contents_journal_checked){
         g_contents_journal_checked=true;
         if(!contents_check_journals()){a.failed=true;contents_notify("SNMP: найден незавершённый перенос прошлого запуска. Вещи сохранены в журнале; нужен отчёт диагностики.");return;}

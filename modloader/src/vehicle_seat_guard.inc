@@ -15,17 +15,7 @@ std::uint32_t seamoth_seat_occupant(void* vehicle) {
     if(state!=kSessionHost&&state!=kSessionGuest)return 0;
     std::uint8_t guid[16]{};
     try {
-        bool replica=false;
-        // A prefab replica has its own local UniqueIdentifier. Its exact scene
-        // object is already associated with the wire GUID by the vehicle sync.
-        // Use that association, never a nearest-vehicle / position heuristic.
-        void* go=g_get_game_object?g_get_game_object.call(vehicle,g_get_game_object.method):nullptr;
-        for(const auto& driven:g_driven) {
-            if(go&&driven.used&&driven.game_object==go&&is_seamoth_vehicle(driven.classId)) {
-                std::memcpy(guid,driven.guid,16);replica=true;break;
-            }
-        }
-        if(!replica&&!component_guid(vehicle,guid))return 0;
+        if(!component_guid(vehicle,guid))return 0;
         VehicleState vehicles[8]{};PeerState peers[kMaxPeers]{};
         const auto count=net_copy_vehicles(vehicles,8);
         const auto peer_count=net_copy_peers(peers,kMaxPeers);
@@ -34,13 +24,23 @@ std::uint32_t seamoth_seat_occupant(void* vehicle) {
         static double next_check_log=0;
         if(now>=next_check_log) {
             next_check_log=now+1;
-            LOG_INFO("vehicle seat: entry check source=%s pilot=%08x vehicles=%zu peers=%zu",
-                     replica?"replica":"native",pilot,count,peer_count);
+            LOG_INFO("vehicle seat: entry check pilot=%08x vehicles=%zu peers=%zu",pilot,count,peer_count);
         }
         return pilot;
     } catch(...) {
         LOG_WARN("vehicle seat: identity lookup failed; original interaction retained");
         return 0;
+    }
+}
+
+void seamoth_restore_local_controls(void* vehicle) {
+    if (!g_get_game_object) return;
+    void* go = g_get_game_object.call(vehicle, g_get_game_object.method);
+    for (auto& tracked : g_driven) {
+        if (go && tracked.used && tracked.game_object == go && is_seamoth_vehicle(tracked.classId)) {
+            release_driven(&tracked, "local entry");
+            return;
+        }
     }
 }
 
@@ -65,6 +65,7 @@ void hooked_seamoth_hand_click(void* vehicle,void* hand,void* method) {
 }
 void hooked_seamoth_enter(void* vehicle,void* player,bool teleport,bool animation,void* method) {
     if(const auto pilot=seamoth_seat_occupant(vehicle)) {seamoth_seat_notice(pilot,"enter");return;}
+    seamoth_restore_local_controls(vehicle);
     if(g_seamoth_enter_original)g_seamoth_enter_original(vehicle,player,teleport,animation,method);
 }
 

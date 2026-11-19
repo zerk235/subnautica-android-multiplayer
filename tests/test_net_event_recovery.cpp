@@ -255,11 +255,40 @@ int main() {
     memcpy(pickup.guid, drop.guid, sizeof(pickup.guid));
     strcpy(pickup.object_id, drop.object_id);
     net_post_world_event(pickup, true);
+    WorldEvent bay = drop;
+    bay.tech_type = item_drop_sync::kVehicleBay;
+    bay.build_flags = item_drop_sync::kBayDeployed;
+    bay.guid[0] = 43;
+    strcpy(bay.object_id, "deployed-bay");
+    net_post_world_event(bay, true);
+    WorldEvent locker_motion = drop;
+    locker_motion.kind = kWorldEventLockerMotion;
+    locker_motion.tech_type = item_drop_sync::kWaterproofLocker;
+    locker_motion.build_flags = item_drop_sync::kLockerMoving;
+    locker_motion.guid[0] = 45;
+    strcpy(locker_motion.object_id, "moving-waterproof-locker");
+    assert(net_try_post_world_event(locker_motion));
     service();
     packets = read_packets(c);
     activate(c, a);
     feed(packets, a);
-    assert(net_copy_world_events(decoded, 4) == 2);
+    assert(net_copy_world_events(decoded, 4) == 4);
+    const auto& movement = decoded[3];
+    assert(item_drop_sync::valid_locker_motion(movement));
+    assert(movement.build_flags == item_drop_sync::kLockerMoving &&
+           movement.x == locker_motion.x && movement.vz == locker_motion.vz &&
+           strcmp(movement.object_id, locker_motion.object_id) == 0 &&
+           !memcmp(movement.guid, locker_motion.guid, sizeof(movement.guid)));
+    assert(!item_drop_sync::valid_spawn(movement));
+    auto release = movement;
+    release.build_flags = 0;
+    assert(item_drop_sync::valid_locker_motion(release));
+    release.build_flags = 2;
+    assert(!item_drop_sync::valid_locker_motion(release));
+    assert(item_drop_sync::valid_spawn(decoded[2]));
+    assert(item_drop_sync::vehicle_bay_deployed(decoded[2]));
+    decoded[2].build_flags = 0;
+    assert(!item_drop_sync::vehicle_bay_deployed(decoded[2]));
     assert(item_drop_sync::valid_spawn(decoded[0]));
     assert(decoded[0].tech_type == drop.tech_type && strcmp(decoded[0].object_id, drop.object_id) == 0 &&
            decoded[0].x == drop.x && decoded[0].vz == drop.vz);
@@ -269,22 +298,73 @@ int main() {
            item_drop_sync::supersedes(decoded[1], decoded[0]));
     decoded[1].guid[0]++;
     assert(!item_drop_sync::supersedes(decoded[1], decoded[0]));
-    for (int tech : {3, 15, 17, 32, 35, 62, 2503, 3501, 3502, 3504}) {
+    for (int tech : {3, 15, 17, 32, 35, 62, 2503, 3501, 3502, 3504,
+                     item_drop_sync::kGravTrap, item_drop_sync::kWaterproofLocker}) {
         decoded[0].tech_type = tech;
         assert(item_drop_sync::valid_spawn(decoded[0]));
     }
     auto resource_pickup = decoded[1];
     assert(resource_pickup.tech_type == pickup.tech_type &&
            strcmp(resource_pickup.object_id, pickup.object_id) == 0);
-    assert(item_drop_sync::has_resource_identity(resource_pickup));
+    assert(item_drop_sync::has_item_identity(resource_pickup));
     assert(!item_drop_sync::valid_spawn(resource_pickup));
     resource_pickup.object_id[0] = '\0';
-    assert(!item_drop_sync::has_resource_identity(resource_pickup));
-    decoded[0].tech_type = 758; // Grav Trap has instance state.
-    assert(!item_drop_sync::valid_spawn(decoded[0]));
+    assert(!item_drop_sync::has_item_identity(resource_pickup));
     decoded[0].tech_type = 16;
     memset(decoded[0].object_id, 'x', sizeof(decoded[0].object_id));
     assert(!item_drop_sync::valid_spawn(decoded[0]));
+
+    // Nearby locker recovery uses the drop transport, with create-only semantics.
+    WorldEvent locker_presence = locker_motion;
+    locker_presence.kind = kWorldEventDrop;
+    locker_presence.build_flags = item_drop_sync::kLockerEnsurePresent;
+    WorldEvent locker_pickup = locker_presence;
+    locker_pickup.kind = kWorldEventPickup;
+    locker_pickup.build_flags = 0;
+    assert(item_drop_sync::valid_spawn(locker_presence));
+    assert(item_drop_sync::locker_presence(locker_presence));
+    assert(!item_drop_sync::locker_presence(bay));
+    assert(!item_drop_sync::locker_presence(locker_motion));
+    assert(!item_drop_sync::supersedes(locker_presence, locker_pickup));
+    assert(item_drop_sync::supersedes(locker_pickup, locker_presence));
+    ++g_session.epoch;
+    activate(a, c);
+    net_post_world_event(locker_presence, true);
+    service();
+    packets = read_packets(c);
+    activate(c, a);
+    feed(packets, a);
+    assert(net_copy_world_events(decoded, 4) == 1);
+    assert(item_drop_sync::locker_presence(decoded[0]));
+    assert(strcmp(decoded[0].object_id, locker_presence.object_id) == 0);
+
+    // The next pilot receives the same native identity on the real vehicle wire path.
+    activate(a, c);
+    VehicleState seamoth{};
+    strcpy(seamoth.classId, "SeaMoth");
+    strcpy(seamoth.object_id, "native-seamoth-id");
+    seamoth.guid[0] = 44;
+    seamoth.x = 20;
+    send_vehicle(g_peers[0], seamoth);
+    packets = read_packets(c);
+    auto wire = std::find_if(packets.begin(), packets.end(), [](const Datagram& datagram) {
+        return datagram.size() == sizeof(VehiclePacket) && datagram[4] == kPacketVehicle;
+    });
+    assert(wire != packets.end());
+    activate(c, a);
+    feed({*wire}, a);
+    VehicleState vehicles[2]{};
+    assert(net_copy_vehicles(vehicles, 2) == 1);
+    assert(vehicles[0].pilot == a.id && vehicles[0].guid[0] == 44 &&
+           strcmp(vehicles[0].object_id, seamoth.object_id) == 0 && vehicles[0].x == 20);
+    VehiclePacket bad{};
+    memcpy(&bad, wire->data(), sizeof(bad));
+    bad.sequence++;
+    bad.x = 21;
+    memset(bad.object_id, 'x', sizeof(bad.object_id));
+    memcpy(wire->data(), &bad, sizeof(bad));
+    feed({*wire}, a);
+    assert(net_copy_vehicles(vehicles, 2) == 1 && vehicles[0].x == 20);
 
     ++g_session.epoch;
     activate(a, c);

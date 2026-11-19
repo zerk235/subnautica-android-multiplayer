@@ -3,12 +3,17 @@ package io.github.zerk235.snmp.installer;
 import android.app.*;
 import android.content.*;
 import android.content.pm.PackageInfo;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.*;
 import android.provider.Settings;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
+import android.text.format.Formatter;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -23,12 +28,18 @@ public final class MainActivity extends Activity {
     TextView game, homeChip, status;
     Button launchHost, launchGuest, recoverGame, quickBackup, quickDiagnose, quickJournal;
     // Install screen views.
-    TextView[] stepTitles, stepSubtitles, stepChevrons;
-    TextView[] stepBadges = new TextView[5];
-    LinearLayout stepRows[] = new LinearLayout[5];
-    LinearLayout progressHost;
-    TextView note, installHint;
-    Button install, cancel;
+    TextView installStage, installGame, note, progressSize;
+    ProgressBar installProgress;
+    final TextView[] installPhases = new TextView[3];
+    int shownPhase = -1;
+    ImageView ocean;
+    Button installError;
+    Button install, cancel, homeInstall, nextInstall;
+    Button installShizukuHelp, installImport, installExport, installWithoutBackup;
+    LinearLayout installRoles;
+    Runnable nextInstallAction;
+    String modCheckKey;
+    Boolean installedModMatches;
     // Worlds screen views.
     TextView savesNote, removalHint;
     Button backup, restore, export, importCopy, remove;
@@ -41,6 +52,7 @@ public final class MainActivity extends Activity {
     ScrollView screens[] = new ScrollView[4];
     LinearLayout bodies[] = new LinearLayout[4];
     TextView tabIcons[], tabLabels[];
+    int activeTab;
 
     JSONObject profileState;
     Button recoverAssets;
@@ -58,31 +70,43 @@ public final class MainActivity extends Activity {
     public void onCreate(Bundle state) {
         super.onCreate(state);
         if (state != null) removalToken = state.getString("removalToken");
-        getWindow().setStatusBarColor(Ui.BG);
+        getWindow().setStatusBarColor(0x66041422);
         getWindow().setNavigationBarColor(Ui.BG);
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+
+        FrameLayout backdrop = new FrameLayout(this);
+        backdrop.setBackgroundColor(Ui.BG);
+        ocean = installArt("patcher_ocean");
+        backdrop.addView(ocean, new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Ui.BG);
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            view.setPadding(0, insets.getSystemWindowInsetTop(), 0, 0);
+            return insets;
+        });
         FrameLayout content = new FrameLayout(this);
-        content.setBackgroundColor(Ui.BG);
         for (int i = 0; i < 4; i++) {
             ScrollView scroll = new ScrollView(this);
             scroll.setFillViewport(true);
-            scroll.setBackgroundColor(Ui.BG);
+            if (i != 1) scroll.setBackgroundColor(Ui.BG);
             bodies[i] = screen();
             scroll.addView(bodies[i]);
             screens[i] = scroll;
             content.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         }
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1f));
-        root.addView(bottomNav());
-        setContentView(root);
+        LinearLayout.LayoutParams navigationParams = new LinearLayout.LayoutParams(-1, -2);
+        navigationParams.setMargins(dp(8), dp(5), dp(8), dp(6));
+        root.addView(bottomNav(), navigationParams);
+        backdrop.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        setContentView(backdrop);
         buildHome(bodies[0]);
         buildInstall(bodies[1]);
         buildWorlds(bodies[2]);
         buildSettings(bodies[3]);
-        selectTab(0);
+        selectTab(state == null ? 1 : state.getInt("tab", 1));
         Shizuku.addRequestPermissionResultListener(permissionResult);
         render();
     }
@@ -102,17 +126,15 @@ public final class MainActivity extends Activity {
         LinearLayout nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
         nav.setGravity(Gravity.CENTER);
-        nav.setBackground(Ui.round(this, Color.argb(255, 12, 28, 40), 0, Ui.CARD_STROKE, 0));
-        GradientDrawable top = Ui.round(this, Ui.CARD_STROKE, 0, 0, 0);
-        top.setShape(GradientDrawable.RECTANGLE);
-        top.setCornerRadii(new float[]{0, 0, 0, 0, dp(18), 0, 0, dp(18)});
-        nav.setBackground(top);
-        nav.setPadding(0, dp(8), 0, dp(6));
+        nav.setBackground(Ui.lagoonSurface(this, 23, false));
+        nav.setPadding(dp(4), dp(4), dp(4), dp(4));
         String[] icons = {"⌂", "↧", "▦", "⚙"};
         String[] labels = {"Главная", "Установка", "Миры", "Настройки"};
         tabIcons = new TextView[4]; tabLabels = new TextView[4];
         for (int i = 0; i < 4; i++) {
             LinearLayout tab = Ui.tab(this, icons[i], labels[i]);
+            tab.setPadding(dp(2), dp(5), dp(2), dp(5));
+            tab.setMinimumHeight(dp(48));
             final int index = i;
             tab.setOnClickListener(v -> selectTab(index));
             nav.addView(tab, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -124,11 +146,15 @@ public final class MainActivity extends Activity {
     }
 
     void selectTab(int index) {
+        activeTab = index;
+        ocean.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         for (int i = 0; i < 4; i++) {
             screens[i].setVisibility(i == index ? View.VISIBLE : View.GONE);
+            tabs[i].setSelected(i == index);
+            tabs[i].setBackground(i == index ? Ui.lagoonSurface(this, 18, true) : null);
             int color = i == index ? Ui.CYAN : Ui.MUTED;
             tabIcons[i].setTextColor(color);
-            tabLabels[i].setTextColor(color);
+            tabLabels[i].setTextColor(i == index ? Color.WHITE : color);
         }
     }
 
@@ -171,6 +197,12 @@ public final class MainActivity extends Activity {
         homeChip.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
         statusCard.addView(homeChip);
         statusCard.addView(gap(8));
+        homeInstall = Ui.button(this, "Установить или обновить мод", 0);
+        homeInstall.setOnClickListener(v -> {
+            selectTab(1);
+            screens[1].scrollTo(0, 0);
+        });
+        statusCard.addView(homeInstall);
         recoverGame = Ui.button(this, "↩  Вернуть игру в текущий профиль", 1);
         recoverGame.setVisibility(View.GONE);
         recoverGame.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Вернуть установленную копию игры?")
@@ -186,25 +218,19 @@ public final class MainActivity extends Activity {
         coop.addView(gap(4));
         coop.addView(Ui.caption(this, "Играйте вместе по одной Wi-Fi сети."));
         coop.addView(gap(10));
-        launchHost = Ui.button(this, " ◉  Создать игру (Хост)", 0);
-        launchHost.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Этот телефон — хост")
-            .setMessage("Сохрани текущую игру и выйди в главное меню. После запуска загрузи здесь мир, которым хочешь поделиться. Можно выбрать и копию, полученную от другого хоста.\n\nНа втором телефоне выбери «Присоединиться (клиент)» и оставь игру в главном меню. Роль сохраняется для следующих запусков.")
-            .setNegativeButton("Отмена", null).setPositiveButton("Запустить хостом", (d, w) -> launchGame("host")).show());
+        launchHost = roleButton(true);
         coop.addView(launchHost);
         coop.addView(gap(8));
-        launchGuest = Ui.button(this, " ◉  Присоединиться (Клиент)", 1);
-        launchGuest.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Этот телефон — гость")
-            .setMessage("Сохрани текущую игру и выйди в главное меню. У хоста уже должен быть загружен мир. На этом телефоне оставь главное меню — мод сам получит мир и подключится.\n\nЕсли локальный мир с таким именем отличается, его папка будет сохранена отдельно перед получением копии хоста. Роль сохраняется для следующих запусков.")
-            .setNegativeButton("Отмена", null).setPositiveButton("Подключиться гостем", (d, w) -> launchGame("guest")).show());
+        launchGuest = roleButton(false);
         coop.addView(launchGuest);
         body.addView(coop);
         body.addView(gap(12));
 
         // Connection state card.
         LinearLayout conn = Ui.card(this);
-        conn.addView(Ui.text(this, "Состояние подключения", 15, Ui.MUTED));
+        conn.addView(Ui.text(this, "Последнее действие", 15, Ui.MUTED));
         conn.addView(gap(4));
-        status = Ui.text(this, "Не подключено", 14, Ui.TEXT);
+        status = Ui.text(this, "Операций пока нет", 14, Ui.TEXT);
         conn.addView(status);
         body.addView(conn);
         body.addView(gap(12));
@@ -215,7 +241,7 @@ public final class MainActivity extends Activity {
         quick.addView(gap(10));
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
-        quickBackup = Ui.button(this, "⟳\nСинхр. миры", 1);
+        quickBackup = Ui.button(this, "⟳\nКопия миров", 1);
         quickDiagnose = Ui.button(this, "✚\nДиагностика", 1);
         quickJournal = Ui.button(this, "≡\nЖурнал", 1);
         quickBackup.setOnClickListener(v -> confirmBackup());
@@ -238,68 +264,184 @@ public final class MainActivity extends Activity {
         return g;
     }
 
-    void buildInstall(LinearLayout body) {
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        TextView icon = Ui.text(this, "↧", 22, Ui.CYAN);
-        icon.setPadding(0, 0, dp(10), 0);
-        head.addView(icon);
-        TextView title = Ui.header(this, "Установка мода");
-        head.addView(title);
-        body.addView(head);
-        body.addView(gap(4));
-        body.addView(Ui.caption(this, "Пошаговая подготовка игры\nи установка модификации."));
-        body.addView(gap(14));
+    Button roleButton(boolean host) {
+        Button button = Ui.button(this, host ? "Создать игру (хост)" : "Присоединиться (гость)", host ? 0 : 1);
+        button.setOnClickListener(v -> new AlertDialog.Builder(this)
+            .setTitle(host ? "Этот телефон — хост" : "Этот телефон — гость")
+            .setMessage(host
+                ? "Сохранитесь и выйдите в меню, если игра открыта. После запуска загрузите и сохраните мир, которым хотите поделиться. На втором телефоне выберите «Присоединиться (гость)»."
+                : "Оставьте игру в главном меню. После того как хост загрузит мир, мод получит его и подключится. Если локальный мир с таким именем отличается, его папка будет сохранена отдельно.")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton(host ? "Запустить хостом" : "Подключиться гостем", (d, w) -> launchGame(host ? "host" : "guest"))
+            .show());
+        return button;
+    }
 
-        String[] titles = {"Подключить Shizuku", "Создать резервную копию", "Подготовить игру", "Заменить игру", "Проверка"};
-        String[] subs = {"Служба для доступа к файлам системы", "Сохранение оригинального APK и миров", "Патч APK и добавление мода", "Установка модифицированного APK", "Убедитесь, что мод работает"};
-        stepTitles = new TextView[5]; stepSubtitles = new TextView[5]; stepChevrons = new TextView[5];
-        for (int i = 0; i < 5; i++) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackground(Ui.round(this, Ui.CARD, 16, Ui.CARD_STROKE, 1));
-            int pad = dp(12); row.setPadding(pad, pad, pad, pad);
-            LinearLayout textCol = new LinearLayout(this);
-            textCol.setOrientation(LinearLayout.VERTICAL);
-            stepTitles[i] = Ui.text(this, titles[i], 15, Ui.TEXT);
-            stepTitles[i].setTypeface(Typeface.DEFAULT_BOLD);
-            stepSubtitles[i] = Ui.caption(this, subs[i]);
-            textCol.addView(stepTitles[i]);
-            textCol.addView(stepSubtitles[i]);
-            final int step = i;
-            row.setOnClickListener(v -> tapStep(step));
-            row.addView(stepBadges[i] = Ui.stepBadge(this, i + 1, 0), new LinearLayout.LayoutParams(dp(34), dp(34)));
-            TextView spacer = new TextView(this); spacer.setPadding(dp(12), 0, 0, 0);
-            row.addView(textCol, new LinearLayout.LayoutParams(0, -2, 1f));
-            stepChevrons[i] = Ui.text(this, "›", 18, Ui.MUTED);
-            row.addView(stepChevrons[i]);
-            stepRows[i] = row;
-            body.addView(row);
-            body.addView(gap(8));
+    ImageView installArt(String name) {
+        ImageView view = new ImageView(this);
+        view.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        view.setImageResource(getResources().getIdentifier(name, "drawable", getPackageName()));
+        view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return view;
+    }
+
+    LinearLayout installMasthead() {
+        LinearLayout masthead = new LinearLayout(this);
+        masthead.setOrientation(LinearLayout.VERTICAL);
+        masthead.setGravity(Gravity.CENTER);
+        masthead.setMinimumHeight(dp(184));
+        masthead.setPadding(0, 0, 0, dp(15));
+        SpannableString brand = new SpannableString("SUBNAUTICA");
+        brand.setSpan(new ForegroundColorSpan(0xffffa24b), 0, 3, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        TextView name = Ui.text(this, "", 31, 0xffe2f7ff);
+        name.setText(brand);
+        name.setTypeface(Typeface.create("sans-serif-black", Typeface.ITALIC));
+        name.setShadowLayer(dp(4), 0, dp(2), 0xe7001421);
+        masthead.addView(name, new LinearLayout.LayoutParams(-2, -2));
+        TextView patcher = Ui.text(this, "Patcher", 17, 0xffb7f5ff);
+        patcher.setTypeface(Typeface.DEFAULT_BOLD);
+        patcher.setPadding(dp(22), dp(3), dp(22), dp(3));
+        patcher.setBackground(Ui.lagoonSurface(this, 16, false));
+        masthead.addView(patcher, new LinearLayout.LayoutParams(-2, -2));
+        return masthead;
+    }
+
+    LinearLayout buildInstallPhases() {
+        LinearLayout row = new LinearLayout(this);
+        String[] labels = {"Подготовка", "Установка", "Готово"};
+        for (int phase = 0; phase < labels.length; phase++) {
+            TextView view = Ui.text(this, labels[phase], 12, Ui.TEXT);
+            view.setGravity(Gravity.CENTER);
+            view.setMinimumHeight(dp(36));
+            view.setPadding(dp(4), dp(5), dp(4), dp(5));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1f);
+            if (phase > 0) params.setMarginStart(dp(5));
+            row.addView(view, params);
+            installPhases[phase] = view;
         }
+        return row;
+    }
 
-        LinearLayout progressCard = Ui.card(this);
-        progressCard.addView(Ui.text(this, "Прогресс установки", 15, Ui.MUTED));
-        progressCard.addView(gap(10));
-        progressHost = new LinearLayout(this);
-        progressCard.addView(progressHost);
-        body.addView(gap(4));
-        body.addView(progressCard);
-        body.addView(gap(12));
+    void showInstallPhase(int phase) {
+        if (shownPhase == phase) return;
+        shownPhase = phase;
+        for (int index = 0; index < installPhases.length; index++) {
+            TextView view = installPhases[index];
+            boolean active = index == phase;
+            view.setBackground(Ui.lagoonSurface(this, 18, active));
+            view.setTextColor(active ? Color.WHITE : Ui.MUTED);
+            view.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            view.setSelected(active);
+        }
+    }
 
-        LinearLayout hint = Ui.card(this);
-        hint.addView(Ui.header(this, "Подсказка"));
-        hint.addView(gap(6));
-        installHint = Ui.text(this, "Убедись, что у тебя установлены:\n• Shizuku (v13+)\n• Оригинальная игра v1.22.83315\n• Достаточно свободного места (≈ 2 ГБ)", 13, Ui.MUTED);
-        hint.addView(installHint);
-        body.addView(hint);
-        body.addView(gap(12));
+    void showInstallProgress(boolean busy, boolean ready, SharedPreferences statusPrefs) {
+        long total = busy ? statusPrefs.getLong("progressTotal", 0) : 0;
+        installProgress.setIndeterminate(busy && total <= 0);
+        progressSize.setVisibility(total > 0 ? View.VISIBLE : View.GONE);
+        if (total > 0) {
+            long done = Math.max(0, Math.min(total, statusPrefs.getLong("progressDone", 0)));
+            installProgress.setProgress((int) Math.min(100, done * 100 / total));
+            updateText(progressSize, Formatter.formatShortFileSize(this, done) + " / "
+                + Formatter.formatShortFileSize(this, total));
+        } else if (!busy) {
+            installProgress.setProgress(ready ? 100 : 0);
+        }
+    }
 
-        note = Ui.text(this, "", 14, Ui.MUTED);
-        body.addView(note);
+    LinearLayout buildInstallGameRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(9), dp(7), dp(10), dp(7));
+        row.setBackground(Ui.lagoonSurface(this, 15, false));
+        ImageView image = installArt("install_reef");
+        image.setBackground(Ui.round(this, Ui.CARD, 10, 0, 0));
+        image.setClipToOutline(true);
+        row.addView(image, new LinearLayout.LayoutParams(dp(52), dp(44)));
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        labels.setPaddingRelative(dp(10), 0, 0, 0);
+        TextView title = Ui.header(this, "Subnautica вдвоём");
+        title.setTextSize(16);
+        title.setAccessibilityHeading(true);
+        labels.addView(title);
+        installGame = Ui.caption(this, "");
+        installGame.setTextColor(Color.rgb(186, 224, 227));
+        labels.addView(installGame);
+        row.addView(labels, new LinearLayout.LayoutParams(0, -2, 1f));
+        return row;
+    }
+
+    void buildInstall(LinearLayout body) {
+        body.setPadding(dp(9), 0, dp(9), dp(12));
+        body.addView(installMasthead());
+        LinearLayout panel = Ui.card(this);
+        panel.setBackground(Ui.lagoonSurface(this, 25, false));
+        panel.setPadding(dp(9), dp(9), dp(9), dp(10));
+        panel.addView(buildInstallPhases(), new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(gap(9));
+        panel.addView(buildInstallGameRow());
+        panel.addView(gap(8));
+        LinearLayout next = Ui.card(this);
+        next.setBackground(Ui.lagoonSurface(this, 17, false));
+        next.setPadding(dp(12), dp(10), dp(12), dp(10));
+        installStage = Ui.header(this, "Проверяем игру…");
+        installStage.setAccessibilityHeading(true);
+        next.addView(installStage);
+        next.addView(gap(6));
+        note = Ui.text(this, "", 15, Ui.TEXT);
+        next.addView(note);
+        next.addView(gap(12));
+        progressSize = Ui.caption(this, "");
+        progressSize.setGravity(Gravity.END);
+        progressSize.setVisibility(View.GONE);
+        next.addView(progressSize);
+        installProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        installProgress.setContentDescription("Прогресс установки мода");
+        installProgress.setMax(100);
+        installProgress.setProgressTintList(ColorStateList.valueOf(0xff48e3f1));
+        installProgress.setProgressBackgroundTintList(ColorStateList.valueOf(0xff154d62));
+        installProgress.setIndeterminateTintList(ColorStateList.valueOf(0xff48e3f1));
+        next.addView(installProgress, new LinearLayout.LayoutParams(-1, dp(12)));
+        nextInstall = Ui.button(this, "Подготовить игру", 0);
+        Ui.installPrimary(this, nextInstall);
+        nextInstall.setOnClickListener(v -> {
+            if (nextInstallAction != null) nextInstallAction.run();
+        });
+        next.addView(gap(8));
+        next.addView(nextInstall);
+        installRoles = new LinearLayout(this);
+        installRoles.setOrientation(LinearLayout.VERTICAL);
+        Button createGame = roleButton(true);
+        Ui.installPrimary(this, createGame);
+        installRoles.addView(createGame);
+        installRoles.addView(gap(8));
+        installRoles.addView(roleButton(false));
+        next.addView(installRoles);
+        installRoles.setVisibility(View.GONE);
+        installShizukuHelp = Ui.button(this, "Как запустить Shizuku", 1);
+        installShizukuHelp.setOnClickListener(v -> shizukuHelp());
+        next.addView(installShizukuHelp);
+        installWithoutBackup = Ui.button(this, "Без Shizuku · удалить миры", 2);
+        installWithoutBackup.setOnClickListener(v -> confirmReplaceWithoutBackup());
+        installWithoutBackup.setVisibility(View.GONE);
+        next.addView(installWithoutBackup);
+        panel.addView(next);
+        body.addView(panel);
         body.addView(gap(8));
+
+        installError = Ui.button(this, "", 1);
+        installError.setOnClickListener(v -> {
+            JSONObject error = Diagnostics.lastError(this);
+            if (error.has("code")) new AlertDialog.Builder(this)
+                .setTitle(error.optString("title"))
+                .setMessage(error.optString("meaning") + "\n\n" + error.optString("steps"))
+                .setPositiveButton("Понятно", null)
+                .setNeutralButton("Подробности", (dialog, which) -> showLastError()).show();
+        });
+        installError.setVisibility(View.GONE);
+        body.addView(installError);
+
         install = Ui.button(this, "Установить подготовленный мод", 0);
         install.setOnClickListener(v -> {
             try {
@@ -307,7 +449,7 @@ public final class MainActivity extends Activity {
                 String blocked = engine.installBlocker(engine.plan());
                 if (blocked != null) { alert(blocked); return; }
                 if (!getPackageManager().canRequestPackageInstalls()) {
-                    startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                    openInstallPermission();
                     return;
                 }
                 new AlertDialog.Builder(this).setTitle("Установить мод?")
@@ -315,19 +457,22 @@ public final class MainActivity extends Activity {
                     .setNegativeButton("Отмена", null).setPositiveButton("Установить", (d, w) -> start("install")).show();
             } catch (Exception e) { showError("install-check", e); }
         });
-        body.addView(install);
         recoverAssets = Ui.button(this, "Восстановить пакет ресурсов", 1);
         recoverAssets.setVisibility(View.GONE);
         recoverAssets.setOnClickListener(v -> {
             if (!getPackageManager().canRequestPackageInstalls()) {
-                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                openInstallPermission();
                 return;
             }
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("*/*"), 705);
         });
-        body.addView(recoverAssets);
-        body.addView(gap(8));
+        installImport = Ui.button(this, "Открыть ZIP-копию миров", 1);
+        installImport.setOnClickListener(v -> importCopy.performClick());
+        body.addView(installImport);
+        installExport = Ui.button(this, "Сохранить копию миров в ZIP", 1);
+        installExport.setOnClickListener(v -> export.performClick());
+        body.addView(installExport);
         cancel = Ui.button(this, "Отменить ожидающую установку Android", 1);
         cancel.setOnClickListener(v -> {
             int id = PatchService.pendingSession(this);
@@ -341,20 +486,13 @@ public final class MainActivity extends Activity {
             render();
         });
         cancel.setVisibility(View.GONE);
-        body.addView(cancel);
+        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(-1, -2);
+        cancelParams.topMargin = dp(8);
+        panel.addView(cancel, cancelParams);
     }
 
-    void tapStep(int step) {
-        switch (step) {
-            case 0: connectShizuku(); break;
-            case 1: confirmBackup(); break;
-            case 2: confirmPrepare(); break;
-            case 3:
-                if (install.isEnabled()) install.performClick();
-                else if (remove.isEnabled()) confirmReplace();
-                break;
-            case 4: launchGame("auto"); break;
-        }
+    void openInstallPermission() {
+        startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
     }
 
     void buildWorlds(LinearLayout body) {
@@ -376,7 +514,7 @@ public final class MainActivity extends Activity {
         body.addView(worlds);
         body.addView(gap(12));
 
-        backup = Ui.button(this, "  ⟳  Синхронизировать миры\n      Передать миры с хоста к клиенту", 1);
+        backup = Ui.button(this, "Создать копию миров", 1);
         backup.setOnClickListener(v -> confirmBackup());
         body.addView(backup);
         body.addView(gap(10));
@@ -392,7 +530,7 @@ public final class MainActivity extends Activity {
         body.addView(export);
         body.addView(gap(10));
 
-        importCopy = Ui.button(this, "  ⤒  Восстановить из ZIP\n      Импортировать сохранение", 1);
+        importCopy = Ui.button(this, "Открыть ZIP-копию миров", 1);
         importCopy.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT)
             .setType("application/zip").addCategory(Intent.CATEGORY_OPENABLE), 703));
         body.addView(importCopy);
@@ -507,7 +645,7 @@ public final class MainActivity extends Activity {
             else {
                 profileCheckedAt=0;
                 refreshProfiles();
-                alert("Проверяем связь со службой Shizuku. Результат появится на вкладке «Миры».");
+                render();
             }
         } catch (Exception error) { showError("shizuku-connect", error); }
     }
@@ -532,16 +670,60 @@ public final class MainActivity extends Activity {
 
     void confirmPrepare() {
         new AlertDialog.Builder(this).setTitle("Подготовить файлы?")
-            .setMessage("Сначала сохраните игру и выйдите в главное меню. Создадим отдельную копию APK с модом. При смене подписи и предоставленном доступе Shizuku также создадим проверенную копию миров. Если Shizuku недоступен, APK подготовятся, но перед удалением игры копию миров нужно создать отдельно.\n\nНе удаляйте установщик и не очищайте его данные: здесь хранятся копии и ключ обновлений.")
+            .setMessage("Сначала сохраните игру и выйдите в главное меню. Установщик подготовит отдельные файлы с модом. Если понадобится заменить игру, следующим шагом будет проверенная копия миров.")
             .setNegativeButton("Отмена", null).setPositiveButton("Подготовить", (d, w) -> start("prepare")).show();
     }
 
     void confirmReplace() {
         new AlertDialog.Builder(this).setTitle("Проверить копию перед заменой?")
             .setMessage("Сохранитесь и выйдите в главное меню заранее: для финальной проверки игра будет остановлена. Проверим APK, SHA256 копии и совпадение текущих миров с копией. Затем Android отдельно попросит подтвердить удаление Subnautica. После удаления установите подготовленный мод и восстановите миры. До конца замены игру не открывайте. Сам установщик не удаляйте.")
-            .setNegativeButton("Отмена", null).setPositiveButton("Проверить", (d, w) -> {
-                removalToken = UUID.randomUUID().toString();
-                startForegroundService(new Intent(this, PatchService.class).setAction("check-removal").putExtra("token", removalToken));
+            .setNegativeButton("Отмена", null).setPositiveButton("Проверить", (d, w) -> checkReplacement("check-removal")).show();
+    }
+
+    void confirmReplaceWithoutBackup() {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            openInstallPermission();
+            return;
+        }
+        CheckBox accept = new CheckBox(this);
+        accept.setText("Я понимаю, что потеряю миры и прогресс");
+        accept.setPadding(dp(20), dp(8), dp(20), dp(8));
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Установить без Shizuku?")
+            .setMessage("Android удалит Subnautica вместе с мирами и прогрессом в этом профиле. Патчер не создаст их копию. "
+                + "Ранее сохранённые ZIP останутся доступны. Если игра есть в клоне или другом профиле, используйте способ с Shizuku. "
+                + "После проверки APK Android отдельно попросит подтвердить удаление.")
+            .setView(accept).setNegativeButton("Отмена", null)
+            .setPositiveButton("Продолжить без копии", (d, w) -> checkReplacement("check-removal-without-backup"))
+            .create();
+        dialog.setOnShowListener(d -> {
+            Button proceed = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            proceed.setEnabled(false);
+            accept.setOnCheckedChangeListener((button, checked) -> proceed.setEnabled(checked));
+        });
+        dialog.show();
+    }
+
+    void checkReplacement(String action) {
+        try {
+            removalToken = UUID.randomUUID().toString();
+            startForegroundService(new Intent(this, PatchService.class).setAction(action).putExtra("token", removalToken));
+        } catch (Exception error) {
+            removalToken = null;
+            showError(action, error);
+        }
+    }
+
+    void confirmExperimental(PackageInfo game) {
+        new AlertDialog.Builder(this).setTitle("Проверить Subnautica " + game.versionName + "?")
+            .setMessage(PatchEngine.EXPERIMENTAL_NOTICE
+                + "\n\nПеред подготовкой патчер сверит файлы движка. Если они отличаются, установка остановится. "
+                + "Сохраните миры отдельно, прежде чем тестировать мод.")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Проверить и подготовить", (d, w) -> {
+                try {
+                    startForegroundService(new Intent(this, PatchService.class).setAction("prepare-experimental")
+                        .putExtra("acceptedVersion", game.versionName).putExtra("acceptedCode", game.getLongVersionCode()));
+                } catch (Exception error) { showError("prepare-experimental", error); }
             }).show();
     }
 
@@ -631,6 +813,7 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putString("removalToken", removalToken);
+        state.putInt("tab", activeTab);
     }
 
     protected void onActivityResult(int request, int result, Intent data) {
@@ -698,6 +881,8 @@ public final class MainActivity extends Activity {
             String gameLabel = "Игра: " + (info == null ? "не найдена" : info.versionName) + "\nМод: " + mod.getString("buildId").substring(0, 12) + " · протокол " + mod.getInt("protocol");
             if (info == null && engine.retained() != null) gameLabel += "\nИгра осталась в другом профиле / клоне.";
             updateText(game, gameLabel);
+            updateText(installGame, info == null ? "Игра в этом профиле не найдена"
+                : "Версия игры · " + info.versionName);
             boolean busy = PatchService.BUSY.get();
             JSONObject plan = null; String planError = null;
             try { plan = engine.plan(); }
@@ -721,23 +906,28 @@ public final class MainActivity extends Activity {
                 profileError = null;
                 profileCheckedAt = 0;
             }
-            recoverGame.setVisibility(info == null && engine.retained() != null ? View.VISIBLE : View.GONE);
+            boolean gameInAnotherProfile = info == null && engine.retained() != null;
+            recoverGame.setVisibility(gameInAnotherProfile ? View.VISIBLE : View.GONE);
             recoverGame.setEnabled(!busy && pending < 0 && access == null);
             updateText(savesNote, (access == null ? "Shizuku: доступ предоставлен." : access) + "\n" + (saved == null ? "Проверенной копии миров пока нет." : "Копия: " + saved.getInt("files") + " файлов, " + (saved.getLong("bytes") / 1024) + " КиБ. " + (needsRestore ? "После замены игры нужно восстановление." : "Копия хранится отдельно от игры.")));
-            backup.setEnabled(!busy && pending < 0 && info != null && access == null && !needsRestore);
-            restore.setEnabled(!busy && pending < 0 && info != null && saved != null && access == null);
+            boolean supported = info != null && PatchEngine.GAME_VERSION.equals(info.versionName);
+            boolean experimental = !supported && PatchEngine.matchesVersion(info, plan) && plan.optBoolean("experimental");
+            backup.setEnabled(!busy && pending < 0 && supported && access == null && !needsRestore);
+            restore.setEnabled(!busy && pending < 0 && supported && saved != null && access == null);
             export.setEnabled(!busy && saved != null);
             importCopy.setEnabled(!busy && pending < 0);
-            setEnabledStep(0, !busy && access != null);
-            setEnabledStep(1, !busy && pending < 0 && info != null && access == null && !needsRestore);
-            setEnabledStep(2, !busy && info != null && pending < 0);
-            setEnabledStep(4, !busy && info != null && !needsRestore);
-            install.setEnabled(!busy && plan != null && engine.installBlocker(plan) == null && pending < 0);
+            installImport.setEnabled(importCopy.isEnabled());
+            installExport.setEnabled(export.isEnabled());
+            boolean launchable = launchReady(info, needsRestore, busy) && pending < 0;
+            Boolean modMatch = supported || experimental ? checkInstalledMod(engine, info, mod) : Boolean.FALSE;
+            boolean currentMod = Boolean.TRUE.equals(modMatch);
             String blocker = engine.installBlocker(plan);
+            install.setEnabled(!busy && plan != null && blocker == null && pending < 0);
             String replacementBlocker = planError != null ? planError : engine.removalBlocker(plan);
             boolean replacement = replacementBlocker == null;
             String removalBlocker = replacementBlocker;
-            if (busy) removalBlocker = "Дождитесь завершения текущей операции.";
+            if (replacement && !supported) removalBlocker = "Для этой версии доступна экспериментальная замена без копии миров.";
+            else if (busy) removalBlocker = "Дождитесь завершения текущей операции.";
             else if (pending >= 0) removalBlocker = "Подтвердите или отмените текущую установку Android.";
             else if (replacement && shizuku != null) removalBlocker = shizuku;
             else if (replacement && saved == null) removalBlocker = "Создайте проверенную копию миров в патчере.";
@@ -749,47 +939,138 @@ public final class MainActivity extends Activity {
                 : removalBlocker);
             cancel.setVisibility(pending < 0 ? View.GONE : View.VISIBLE);
             cancel.setEnabled(!busy);
-            String noteValue = plan == null ? (planError == null ? "После подготовки здесь станет доступна установка." : planError) : (blocker == null
-                ? "Файлы проверены. Android запросит разрешение и подтверждение установки."
-                : blocker);
-            if (replacement && removalBlocker != null) noteValue = removalBlocker;
-            setEnabledStep(3, remove.isEnabled() || install.isEnabled());
-            launchHost.setEnabled(launchReady(info, needsRestore, busy));
-            launchGuest.setEnabled(launchReady(info, needsRestore, busy));
-            if (needsRestore) noteValue = "Мод установлен. Восстановите миры из проверенной копии перед запуском игры.";
-            if (missingAssets) noteValue = "Не найден пакет ресурсов игры. Нажмите «Восстановить пакет ресурсов» и выберите split_base_assets.apk.";
-            updateText(note, noteValue);
-            updateStatusChip(busy, needsRestore, info == null);
-            updateSteps(access, saved, plan, needsRestore, launchReady(info, needsRestore, busy));
-            progressHost.removeAllViews();
-            progressHost.addView(Ui.progressStrip(this, stepStates));
+            launchHost.setEnabled(launchable && currentMod);
+            launchGuest.setEnabled(launchable && currentMod);
+            installRoles.setVisibility(launchable && currentMod ? View.VISIBLE : View.GONE);
+            updateStatusChip(busy, needsRestore, info, currentMod);
+            homeInstall.setVisibility(launchable && currentMod ? View.GONE : View.VISIBLE);
+            boolean requiresShizuku = (info != null && needsRestore && saved != null)
+                || (replacement && supported) || (gameInAnotherProfile && !install.isEnabled());
+            installWithoutBackup.setVisibility(!busy && pending < 0 && replacement && supported && !currentMod
+                ? View.VISIBLE : View.GONE);
+            installImport.setVisibility(needsRestore && saved != null ? View.VISIBLE : View.GONE);
+            installExport.setVisibility(saved != null && (replacement || needsRestore) ? View.VISIBLE : View.GONE);
+            installShizukuHelp.setVisibility(!busy && pending < 0 && requiresShizuku && access != null
+                ? View.VISIBLE : View.GONE);
+            SharedPreferences statusPrefs = getSharedPreferences("status", 0);
+            String operation = busy ? getSharedPreferences("diagnostics", 0).getString("action", "") : "";
+            boolean preparing = "prepare".equals(operation) || "prepare-experimental".equals(operation);
+            boolean installing = pending >= 0 || needsRestore || (plan != null && (info == null || supported || experimental))
+                || "install".equals(operation) || "recover-assets".equals(operation);
+            int phase = launchable && currentMod ? 2 : installing && !preparing ? 1 : 0;
+            showInstallPhase(phase);
+            showInstallProgress(busy, phase == 2, statusPrefs);
+            boolean installPermission = getPackageManager().canRequestPackageInstalls();
+            if (busy) {
+                String heading = preparing ? "Подготовка мода"
+                    : "install".equals(operation) ? "Установка / обновление мода" : "Идёт операция";
+                showNextInstall(heading, statusPrefs.getString("message", "Выполняется операция…"), null, null);
+            } else if (pending >= 0) {
+                showNextInstall("Ожидаем Android", "Подтвердите установку в окне Android. Если окно закрылось, отмените запрос и повторите установку.",
+                    null, null);
+            } else if (info != null && !supported && !experimental) {
+                showNextInstall("Версия " + info.versionName + " не поддерживается", "Мод проверен на " + PatchEngine.GAME_VERSION
+                    + ". Для этой версии можно запустить экспериментальную проверку.", "Проверить совместимость", () -> confirmExperimental(info));
+            } else if (!installPermission && (missingAssets || (install.isEnabled() && Boolean.FALSE.equals(modMatch) && !(info != null && needsRestore)))) {
+                showNextInstall("Разрешите установку мода", "Разрешите этому приложению устанавливать APK в настройках Android. Затем вернитесь сюда и продолжите.",
+                    "Разрешить установку", this::openInstallPermission);
+            } else if (missingAssets) {
+                showNextInstall("Нужны файлы игры", "В игре отсутствуют ресурсы. Выберите split_base_assets.apk от установленной версии игры.",
+                    "Восстановить ресурсы", () -> recoverAssets.performClick());
+            } else if (info != null && needsRestore) {
+                if (saved == null) {
+                    showNextInstall("Нужна копия миров", "Откройте ZIP с копией миров, чтобы вернуть сохранения в игру.",
+                        "Открыть ZIP-копию миров", () -> importCopy.performClick());
+                } else if (access != null) {
+                    showNextInstall("Дайте доступ к сохранениям", access, "Подключить Shizuku", this::connectShizuku);
+                } else {
+                    showNextInstall("Верните свои миры", "Игра установлена. Сначала верните сохранения из проверенной копии.",
+                        "Восстановить миры", () -> restore.performClick());
+                }
+            } else if (modMatch == null) {
+                showNextInstall("Проверяем мод…", "Сверяем установленную игру с этой сборкой.", null, null);
+            } else if (launchable && currentMod) {
+                String connection = "Подключите оба телефона к одной сети Wi-Fi. На телефоне с вашим миром нажмите «Создать игру». На втором — «Присоединиться».";
+                showNextInstall(experimental ? "Экспериментальная сборка" : "Всё готово для игры вдвоём",
+                    experimental ? "Работа мода на этой версии не гарантируется. " + connection : connection, null, null);
+            } else if (install.isEnabled()) {
+                String message = info == null ? "Файлы готовы. Подтвердите установку в окне Android."
+                    : "Файлы готовы. Android обновит игру поверх установленной и сохранит миры. Shizuku не нужен.";
+                showNextInstall("Установите мод на этот телефон", message,
+                    "Установить подготовленный мод", () -> install.performClick());
+            } else if (gameInAnotherProfile) {
+                if (access != null) {
+                    showNextInstall("Нужен доступ к другому профилю", "Игра осталась в другом профиле Android. Подключите Shizuku, чтобы вернуть её в текущий профиль.",
+                        "Подключить Shizuku", this::connectShizuku);
+                } else {
+                    showNextInstall("Верните игру в этот профиль", "Игра осталась в другом профиле Android. Верните её сюда, чтобы продолжить установку.",
+                        "Вернуть игру в текущий профиль", () -> recoverGame.performClick());
+                }
+            } else if (info == null) {
+                showNextInstall("Установите Subnautica", plan != null ? blocker : "Сначала установите Subnautica " + PatchEngine.GAME_VERSION + " в этом профиле Android.", null, null);
+            } else if (replacement && experimental) {
+                showNextInstall("Экспериментальная замена игры", "APK подготовлены. При замене Android удалит миры и прогресс. "
+                    + "Патчер этой версии не умеет сохранять эти миры.", "Без Shizuku · удалить миры", this::confirmReplaceWithoutBackup);
+            } else if (replacement && access != null) {
+                showNextInstall("Дайте доступ к сохранениям", "Для замены игры нужен доступ к мирам. " + access,
+                    "Подключить Shizuku", this::connectShizuku);
+            } else if (replacement && saved == null) {
+                showNextInstall("Сохраните копию миров", "Сохранитесь в игре, выйдите в главное меню и сделайте копию миров.",
+                    "Создать копию миров", backup.isEnabled() ? this::confirmBackup : null);
+            } else if (replacement) {
+                showNextInstall("Замените игру", removalBlocker == null ? "Файлы готовы. Установщик проверит актуальность копии миров перед заменой игры." : removalBlocker,
+                    "Проверить копию и заменить игру", remove.isEnabled() ? this::confirmReplace : null);
+            } else if (plan == null) {
+                showNextInstall("Подготовьте игру на этом телефоне", "Откройте этот патчер на обоих телефонах. Если сейчас играете, сохраните мир и выйдите в главное меню. Затем нажмите «Подготовить игру».",
+                    "Подготовить игру", this::confirmPrepare);
+            } else {
+                showNextInstall("Обновите подготовленные файлы", blocker, "Подготовить файлы заново", this::confirmPrepare);
+            }
             if (!busy && removalToken != null && removalToken.equals(getSharedPreferences("status", 0).getString("removalToken", ""))) {
                 removalToken = null;
-                long age = SystemClock.elapsedRealtime() - getSharedPreferences("status", 0).getLong("removalReadyAt", 0);
-                String identity = getSharedPreferences("status", 0).getString("removalIdentity", "");
-                getSharedPreferences("status", 0).edit().remove("removalToken").apply();
-                // The grant already includes a fresh Shizuku profile check. The periodic
-                // UI snapshot may have expired during APK hashing and signature verification.
-                if (replacement && pending < 0 && SaveBridge.readiness() == null && age >= 0 && age < 10000) {
+                long age = SystemClock.elapsedRealtime() - statusPrefs.getLong("removalReadyAt", 0);
+                String identity = statusPrefs.getString("removalIdentity", "");
+                boolean discard = statusPrefs.getBoolean("removalDiscardsWorlds", false);
+                statusPrefs.edit().remove("removalToken").apply();
+                if (replacement && pending < 0 && age >= 0 && age < 10000
+                        && (discard ? installPermission : SaveBridge.readiness() == null)) {
                     try {
                         if (!identity.equals(engine.removalIdentity()))
                             throw new IOException("Игра изменилась во время проверки");
+                        SharedPreferences.Editor replacementPrefs = statusPrefs.edit();
+                        if (discard) replacementPrefs.putString(SaveManager.SKIP_RESTORE_TARGET, PatchEngine.targetIdentity(plan));
+                        else replacementPrefs.remove(SaveManager.SKIP_RESTORE_TARGET);
+                        if (!replacementPrefs.commit()) throw new IOException("Не удалось сохранить режим установки");
                         startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + PatchEngine.GAME)));
-                        Diagnostics.event(this, "request_game_removal", "verified current-profile identity and fresh one-use grant");
+                        Diagnostics.event(this, "request_game_removal", discard ? "confirmed replacement without a new backup"
+                            : "verified current-profile identity and backup");
                     } catch (Exception error) { showError("check-removal", error); }
                 } else PatchService.status(this, "Проверка удаления устарела или условия изменились. Игра не удалена. Повторите проверку.");
             }
-            updateText(status, getSharedPreferences("status", 0).getString("message", "Не подключено"));
+            String lastMessage = getSharedPreferences("status", 0).getString("message", "");
+            updateText(status, lastMessage.isEmpty() ? "Операций пока нет" : lastMessage);
+            JSONObject lastError = Diagnostics.lastError(this);
+            boolean showError = !busy && lastError.has("code") && lastMessage.startsWith(lastError.optString("code") + " · ");
+            installError.setVisibility(showError ? View.VISIBLE : View.GONE);
+            if (showError) updateText(installError, lastError.optString("title") + " · Что делать?");
             quickBackup.setEnabled(backup.isEnabled());
             quickDiagnose.setEnabled(!reportBusy);
             quickJournal.setEnabled(errorDetails.isEnabled());
-            recoverGame.setVisibility(info == null && engine.retained() != null ? View.VISIBLE : View.GONE);
         } catch (Exception e) {
+            showInstallPhase(0);
+            showInstallProgress(false, false, getSharedPreferences("status", 0));
             backup.setEnabled(false); restore.setEnabled(false); export.setEnabled(false);
             remove.setEnabled(false); install.setEnabled(false);
             launchHost.setEnabled(false); launchGuest.setEnabled(false);
             recoverGame.setEnabled(false);
-            updateText(note, e.getMessage());
+            installRoles.setVisibility(View.GONE);
+            installShizukuHelp.setVisibility(View.GONE);
+            installWithoutBackup.setVisibility(View.GONE);
+            installImport.setEnabled(false);
+            installExport.setEnabled(false);
+            cancel.setVisibility(View.GONE);
+            installError.setVisibility(View.GONE);
+            showNextInstall("Не удалось проверить игру", e.getMessage(), "Проверить снова", this::render);
             updateText(removalHint, e.getMessage());
             updateText(status, getSharedPreferences("status", 0).getString("message", "Нужна повторная подготовка."));
         }
@@ -804,37 +1085,51 @@ public final class MainActivity extends Activity {
         return !busy && !needsRestore && PatchEngine.hasAssets(info);
     }
 
-    void setEnabledStep(int index, boolean enabled) {
-        stepRows[index].setEnabled(enabled);
-        stepChevrons[index].setEnabled(enabled);
-        stepRows[index].setAlpha(enabled ? 1f : 0.55f);
-    }
-
-    int[] stepStates = new int[5];
-
-    void updateSteps(String access, JSONObject saved, JSONObject plan, boolean needsRestore, boolean ready) {
-        stepStates[0] = access == null ? 2 : 1;
-        stepStates[1] = saved != null ? 2 : stepStates[0] == 2 ? 1 : 0;
-        stepStates[2] = plan != null ? 2 : stepStates[1] == 2 ? 1 : 0;
-        stepStates[3] = needsRestore ? 2 : stepStates[2] == 2 ? 1 : 0;
-        stepStates[4] = ready && !needsRestore ? 2 : needsRestore ? 1 : 0;
-        for (int i = 0; i < 5; i++) {
-            TextView badge = stepBadges[i];
-            GradientDrawable bg = new GradientDrawable();
-            bg.setShape(GradientDrawable.OVAL);
-            if (stepStates[i] == 2) { bg.setColor(Ui.GREEN); badge.setText("✓"); badge.setTextColor(Color.rgb(4, 26, 20)); }
-            else if (stepStates[i] == 1) { bg.setColor(Ui.CYAN); badge.setText(String.valueOf(i + 1)); badge.setTextColor(Color.rgb(4, 26, 20)); }
-            else { bg.setColor(Ui.CARD); bg.setStroke(dp(1), Ui.CARD_STROKE); badge.setText(String.valueOf(i + 1)); badge.setTextColor(Ui.MUTED); }
-            badge.setBackground(bg);
+    Boolean checkInstalledMod(PatchEngine engine, PackageInfo info, JSONObject payload) {
+        String key = info.applicationInfo.sourceDir + "@" + info.lastUpdateTime;
+        if (!key.equals(modCheckKey)) {
+            modCheckKey = key;
+            installedModMatches = null;
+            String expectedHash = payload.optString("sha256");
+            String nativeDir = info.applicationInfo.nativeLibraryDir;
+            new Thread(() -> {
+                boolean matches = false;
+                try {
+                    if (nativeDir != null) {
+                        File installed = new File(nativeDir, "libmain.so");
+                        matches = installed.canRead() && expectedHash.equals(ApkPatcher.sha256(installed));
+                    }
+                    if (!matches) matches = Diagnostics.installedMod(getApplicationContext(), engine)
+                        .optBoolean("matchesInstallerPayload");
+                } catch (Exception ignored) { }
+                final boolean result = matches;
+                handler.post(() -> {
+                    if (key.equals(modCheckKey)) installedModMatches = result;
+                });
+            }, "snmp-check-mod").start();
         }
+        return installedModMatches;
     }
 
-    void updateStatusChip(boolean busy, boolean needsRestore, boolean missing) {
+    void showNextInstall(String stage, String message, String label, Runnable action) {
+        updateText(installStage, stage);
+        updateText(note, message);
+        nextInstallAction = action;
+        nextInstall.setVisibility(action == null ? View.GONE : View.VISIBLE);
+        if (action != null) updateText(nextInstall, label);
+    }
+
+    void updateStatusChip(boolean busy, boolean needsRestore, PackageInfo info, boolean currentMod) throws IOException {
         String label; int color;
-        if (missing) { label = "Игра не найдена"; color = Ui.RED; }
+        if (info == null) { label = "Игра не найдена"; color = Ui.RED; }
+        else if (!PatchEngine.GAME_VERSION.equals(info.versionName)) {
+            label = currentMod ? "Экспериментальная сборка" : "Версия игры не поддерживается"; color = Ui.AMBER;
+        }
         else if (busy) { label = "Выполняется операция"; color = Ui.AMBER; }
         else if (needsRestore) { label = "Требуется восстановление миров"; color = Ui.AMBER; }
-        else { label = "Установлен и готов к игре"; color = Ui.GREEN; }
+        else if (!PatchEngine.hasAssets(info)) { label = "Не найдены ресурсы игры"; color = Ui.AMBER; }
+        else if (currentMod) { label = "Мод установлен"; color = Ui.GREEN; }
+        else { label = "Игра найдена · нужна установка мода"; color = Ui.CYAN; }
         homeChip.setText(label);
         homeChip.setTextColor(color);
         homeChip.setBackground(Ui.round(this, Color.argb(60, Color.red(color), Color.green(color), Color.blue(color)), 20, 0, 0));

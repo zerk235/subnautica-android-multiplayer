@@ -10,6 +10,8 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 final class PatchEngine {
     static final String GAME = "com.unknownworlds.subnautica";
@@ -19,6 +21,9 @@ final class PatchEngine {
     static final String PREPARED_ASSETS_MISSING = "В подготовленном пакете нет ресурсов Subnautica";
     static final int PLAN_SCHEMA = 2;
     static final long MIB = 1024L * 1024;
+    static final String EXPERIMENTAL_NOTICE = "Эта версия официально не поддерживается модом. "
+        + "Даже после проверки возможны вылеты, ошибки синхронизации и повреждение миров. "
+        + "Работу мода и сохранность прогресса на этой версии мы не гарантируем.";
     private static volatile InstalledAssets installedAssets;
     final Context context;
     final File prepared, staging;
@@ -75,7 +80,6 @@ final class PatchEngine {
     static boolean hasAssets(PackageInfo game) throws IOException {
         if (game == null || game.applicationInfo == null) return false;
         if (hasAssetSplit(game)) return true;
-        if (!GAME_VERSION.equals(game.versionName)) return false;
         // The UI polls installed packages. Reopen the APK only after package replacement.
         String path = game.applicationInfo.sourceDir;
         if (path == null) return false;
@@ -131,10 +135,16 @@ final class PatchEngine {
     }
 
     void prepare(ApkPatcher.Progress progress) throws Exception {
+        prepare(progress, null, -1);
+    }
+
+    void prepare(ApkPatcher.Progress progress, String acceptedVersion, long acceptedCode) throws Exception {
         if (!Arrays.asList(Build.SUPPORTED_ABIS).contains("arm64-v8a")) throw new IOException("Нужен телефон Android ARM64");
         PackageInfo game = installed();
         if (game == null) throw new IOException("Сначала установите собственную копию Subnautica " + GAME_VERSION);
-        if (!GAME_VERSION.equals(game.versionName))
+        boolean experimental = !GAME_VERSION.equals(game.versionName);
+        if (experimental && (acceptedVersion == null || !acceptedVersion.equals(game.versionName)
+                || acceptedCode != game.getLongVersionCode()))
             throw new IOException("Поддерживается игра " + GAME_VERSION + "; установлена " + game.versionName);
         File base = new File(game.applicationInfo.sourceDir);
         if (!base.isFile() || !base.canRead()) throw new IOException("Android не разрешил чтение установленного APK");
@@ -142,10 +152,7 @@ final class PatchEngine {
         String sourceCert = certificate(game);
         LocalSigner signer = new LocalSigner();
         boolean full = !sourceCert.equals(signer.fingerprint());
-        // Detect a clone conflict before spending time preparing a replacement or offering deletion.
-        if(full && SaveBridge.readiness()==null) try(SaveBridge bridge=new SaveBridge(context)) {
-            bridge.call(SaveAccessService.CHECK_PROFILES,null,false);
-        }
+        // Preparation only writes installer files. Profile checks belong to the replacement step.
         JSONObject modInfo = payload();
         byte[] mod = ApkPatcher.readSmall(context.getAssets().open("libsnmod.so"), 16 * 1024 * 1024);
         String modSha = ApkPatcher.hex(MessageDigest.getInstance("SHA-256").digest(mod));
@@ -160,6 +167,7 @@ final class PatchEngine {
             if (!file.isFile() || !file.canRead()) throw new IOException("Android не разрешил чтение установленного APK");
             total = Math.addExact(total, file.length()); largest = Math.max(largest, file.length());
         }
+        if (experimental) verifyExperimentalRuntime(sources, progress);
         if (new StatFs(context.getFilesDir().getPath()).getAvailableBytes() < total + largest + 512 * MIB)
             throw new IOException("Недостаточно свободной памяти. Нужно ещё примерно " + ((total + largest + 512*MIB)/MIB) + " МиБ");
         removeOwnTree(staging); if (!staging.mkdir()) throw new IOException("Не удалось создать рабочую папку");
@@ -184,7 +192,7 @@ final class PatchEngine {
                 }
                 ApkIdentity archive = ApkIdentity.read(signed);
                 if (!GAME.equals(archive.packageName) || archive.versionCode != game.getLongVersionCode()
-                        || (i == 0 && !GAME_VERSION.equals(archive.versionName))) throw new IOException("Метаданные подготовленного APK не совпадают с игрой");
+                        || (i == 0 && !Objects.equals(game.versionName, archive.versionName))) throw new IOException("Метаданные подготовленного APK не совпадают с игрой");
                 String split = archive.split;
                 if ((i == 0 && split != null) || (i != 0 && (split == null || !splitNames.add(split))))
                     throw new IOException("Некорректный набор split APK");
@@ -195,7 +203,8 @@ final class PatchEngine {
             if (current == null || current.getLongVersionCode() != game.getLongVersionCode()
                     || !certificate(current).equals(sourceCert) || !Objects.equals(current.applicationInfo.sourceDir, game.applicationInfo.sourceDir))
                 throw new IOException("Установленная игра изменилась. Повторите подготовку");
-            JSONObject plan = new JSONObject().put("schema", PLAN_SCHEMA).put("package", GAME).put("version", GAME_VERSION)
+            JSONObject plan = new JSONObject().put("schema", PLAN_SCHEMA).put("package", GAME).put("version", game.versionName)
+                .put("experimental", experimental)
                 .put("versionCode", game.getLongVersionCode()).put("full", full).put("buildId", modInfo.getString("buildId"))
                 .put("cert", signer.fingerprint()).put("apks", apks);
             write(new File(staging, "plan.json"), plan.toString(2).getBytes(StandardCharsets.UTF_8));
@@ -209,6 +218,39 @@ final class PatchEngine {
             success = true;
             removeOwnTree(previous);
         } finally { if (!success) removeOwnTree(staging); }
+    }
+
+    static void verifyExperimentalRuntime(List<File> sources, ApkPatcher.Progress progress) throws Exception {
+        // Fingerprints of the runtime the native hooks were built against (Android 1.22.83315).
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("lib/arm64-v8a/libil2cpp.so", "8c791d50453130338ec805a45180ea1b67c9c649b0d7ec0d3b881cdaf0622a74");
+        expected.put("lib/arm64-v8a/libunity.so", "dd00d4a035dd229c7aebdf5227ec3d207935c32803a1e6c03598ec1296823309");
+        expected.put("assets/bin/Data/Managed/Metadata/global-metadata.dat", "c9ff786e3226c9c21011fe59ae85c176cdea723ecface3bc2092707000061fb6");
+        progress.update("Проверяем совместимость движка", 0, 0);
+        Set<String> found = new HashSet<>();
+        byte[] buffer = new byte[1024 * 1024];
+        for (File source : sources) {
+            try (ZipFile apk = new ZipFile(source)) {
+                for (Map.Entry<String, String> file : expected.entrySet()) {
+                    ZipEntry entry = apk.getEntry(file.getKey());
+                    if (entry == null) continue;
+                    if (!found.add(file.getKey()) || entry.getSize() <= 0 || entry.getSize() > 256 * MIB)
+                        throw new IOException("Неподдерживаемый набор файлов движка");
+                    MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                    try (InputStream in = apk.getInputStream(entry)) {
+                        long size = 0;
+                        for (int n; (n = in.read(buffer)) != -1;) {
+                            size += n;
+                            if (size > entry.getSize()) throw new IOException("Повреждён файл движка игры");
+                            digest.update(buffer, 0, n);
+                        }
+                    }
+                    if (!file.getValue().equals(ApkPatcher.hex(digest.digest())))
+                        throw new IOException("Движок этой версии отличается. Для неё нужна отдельная сборка мода");
+                }
+            }
+        }
+        if (found.size() != expected.size()) throw new IOException("В APK не найдены файлы для проверки совместимости движка");
     }
 
     private static void copySplit(File source, File target, ApkPatcher.Progress progress) throws IOException {
@@ -228,11 +270,25 @@ final class PatchEngine {
         File file = new File(prepared, "plan.json");
         if (!file.isFile()) return null;
         JSONObject plan = new JSONObject(new String(ApkPatcher.readSmall(new FileInputStream(file), 65536), StandardCharsets.UTF_8));
-        if (plan.getInt("schema") != PLAN_SCHEMA || !GAME.equals(plan.getString("package")) || !GAME_VERSION.equals(plan.getString("version")))
+        if (plan.getInt("schema") != PLAN_SCHEMA || !GAME.equals(plan.getString("package"))
+                || (!GAME_VERSION.equals(plan.getString("version")) && !plan.optBoolean("experimental")))
             throw new IOException("Пакет устарел. Подготовьте его заново");
         if (!payload().getString("buildId").equals(plan.getString("buildId")))
             throw new IOException("Мод обновился. Нажмите «Подготовить мод»");
         return plan;
+    }
+
+    static boolean matchesVersion(PackageInfo game, JSONObject plan) throws JSONException {
+        return game != null && plan != null && game.getLongVersionCode() == plan.getLong("versionCode")
+            && Objects.equals(game.versionName, plan.getString("version"));
+    }
+
+    static String targetIdentity(String version, long versionCode, String cert) {
+        return version + ":" + versionCode + ":" + cert;
+    }
+
+    static String targetIdentity(JSONObject plan) throws JSONException {
+        return targetIdentity(plan.getString("version"), plan.getLong("versionCode"), plan.getString("cert"));
     }
 
     String installBlocker(JSONObject plan) throws Exception {
@@ -245,10 +301,10 @@ final class PatchEngine {
             return plan.getBoolean("full") ? null : "Нужна установленная игра: этот пакет содержит только обновление";
         }
         if (!hasAssets(current)) return ASSETS_MISSING;
-        if (!certificate(current).equals(plan.getString("cert")))
-            return "Подпись установленной игры отличается. Для замены подключите Shizuku, создайте копию миров и нажмите «Удалить старую игру». Перед системным запросом установщик проверит актуальность копии и APK. Затем установите мод и восстановите миры. Не удаляйте игру вручную без проверенной копии.";
-        if (current.getLongVersionCode() != plan.getLong("versionCode") || !GAME_VERSION.equals(current.versionName))
+        if (!matchesVersion(current, plan))
             return "Версия установленной игры изменилась. Подготовьте мод заново";
+        if (!certificate(current).equals(plan.getString("cert")))
+            return "Для установки нужно заменить игру. Выберите способ замены во вкладке «Установка».";
         return null;
     }
 
@@ -256,7 +312,7 @@ final class PatchEngine {
         PackageInfo game=installed();
         if (game == null) return "Subnautica отсутствует в текущем профиле Android.";
         if (plan == null) return "Сначала нажмите «Подготовить игру» на вкладке «Установка».";
-        if (!GAME_VERSION.equals(game.versionName) || game.getLongVersionCode() != plan.getLong("versionCode"))
+        if (!matchesVersion(game, plan))
             return "Версия игры изменилась. Подготовьте мод заново.";
         if (certificate(game).equals(plan.getString("cert")))
             return "Подпись игры совпадает. Нажмите «Установить подготовленный мод» на вкладке «Установка».";
@@ -278,7 +334,7 @@ final class PatchEngine {
         PackageInfo info=installed();
         if(info==null || context.getPackageManager().getLaunchIntentForPackage(GAME)==null)
             throw new IOException("Игра не найдена в текущем профиле после установки. Проверьте восстановление игры из другого профиля Android");
-        if(info.getLongVersionCode()!=plan.getLong("versionCode") || !certificate(info).equals(plan.getString("cert")))
+        if(!matchesVersion(info, plan) || !certificate(info).equals(plan.getString("cert")))
             throw new IOException("Подпись или версия игры после установки не совпала с подготовленным пакетом");
         if (!hasAssetSplit(info) && !ApkPatcher.hasEmbeddedAssets(new File(info.applicationInfo.sourceDir)))
             throw new IOException("В установленной игре нет ресурсов Subnautica");
@@ -311,7 +367,9 @@ final class PatchEngine {
             if (file.length() != entry.getLong("size") || !ApkPatcher.sha256(file).equals(entry.getString("sha256")))
                 throw new IOException("Подготовленный APK повреждён. Подготовьте мод заново");
             signer.verify(file); ApkIdentity info = ApkIdentity.read(file);
-            if (!GAME.equals(info.packageName) || info.versionCode != plan.getLong("versionCode")) throw new IOException("Неверный APK в подготовленном пакете");
+            if (!GAME.equals(info.packageName) || info.versionCode != plan.getLong("versionCode")
+                    || (i == 0 && !plan.getString("version").equals(info.versionName)))
+                throw new IOException("Неверный APK в подготовленном пакете");
             if (i == 0 ? info.split != null : info.split == null || !splits.add(info.split))
                 throw new IOException("Некорректный набор split APK");
             files.add(file);

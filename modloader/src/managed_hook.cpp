@@ -3607,27 +3607,51 @@ void fish_pickup_on_drop(void* pickup);
 void* find_prefab_source(uint32_t tech);
 bool world_operations_ready();
 bool prefab_retain(ManagedRoot& root, void* object);
-void observe_remote_resource_drop(void* pickup, const uint8_t guid[16]);
+void observe_remote_item_drop(void* pickup, const uint8_t guid[16]);
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+bool contents_locker_busy(const char* id);
+void waterproof_before_item_event(const WorldEvent& event);
+#endif
+
+void* g_vehicle_bay_type = nullptr;
+void* g_vehicle_bay_deployed = nullptr;
+Entry<void (*)(void*, bool, void*)> g_vehicle_bay_deploy;
+
+bool waterproof_locker_empty(void* game_object) {
+    static void* storage_type = nullptr;
+    static Entry<GetAnimObjectFn> get_container;
+    static Entry<int32_t (*)(void*, void*)> get_count;
+    if (!storage_type && il2cpp_class_get_type && il2cpp_type_get_object) {
+        if (auto* storage = find_class_in_domain("", "StorageContainer")) {
+            storage_type = il2cpp_type_get_object(il2cpp_class_get_type(storage));
+            get_container.bind(find_method(storage, "get_container", 0));
+        }
+    }
+    if (!get_count) get_count.bind(find_method(find_class_in_domain("", "ItemsContainer"), "get_count", 0));
+    if (!storage_type || !get_container || !get_count) return false;
+    void* storage = find_component_in_hierarchy(game_object, storage_type, nullptr, 0);
+    void* container = storage ? get_container.call(storage, get_container.method) : nullptr;
+    return container && get_count.call(container, get_count.method) == 0;
+}
 
 // Try the prefab path when the native scan could not find the original.
-bool spawn_missing_resource(const WorldEvent& event, const LocalState& local, void** result) {
+bool spawn_missing_item(const WorldEvent& event, const LocalState& local, void** result) {
     if (!item_drop_sync::valid_spawn(event) || !g_unique_try_get || !g_uid_set_id ||
         !g_pickup_get_tech || !g_pickupable_type || !g_pickup_drop_at || !g_get_component ||
-        !g_instantiate || !g_object_destroy || !il2cpp_string_new) return false;
+        g_get_component_is_string || !g_instantiate || !g_object_destroy || !il2cpp_string_new) return false;
     uint8_t expected_guid[16];
     guid_from_string(event.object_id, expected_guid);
     if (memcmp(expected_guid, event.guid, sizeof(expected_guid)) != 0) return false;
     if (!local.valid || !item_drop_sync::near_drop(event, local.x, local.y, local.z)) return false;
 
-    // The existing object always wins. Also check the native registry in case
-    // the Id belongs to an object that the Pickupable sweep did not see.
-    void* prefab = find_prefab_source(event.tech_type);
-    if (!prefab) return false;
+    // The existing object always wins, even while the prefab is loading.
     ManagedRoot id;
     void* registered = nullptr;
     if (!prefab_retain(id, il2cpp_string_new(event.object_id)) ||
         g_unique_try_get.call(id.get(), &registered, g_unique_try_get.method)) return false;
 
+    void* prefab = find_prefab_source(event.tech_type);
+    if (!prefab) return false;
     void* source = g_get_component.call(prefab, g_pickupable_type, g_get_component.method);
     if (!source || g_pickup_get_tech.call(source, g_pickup_get_tech.method) !=
                        static_cast<uint32_t>(event.tech_type)) return false;
@@ -3643,7 +3667,7 @@ bool spawn_missing_resource(const WorldEvent& event, const LocalState& local, vo
         if (pickup_id(pickupable, assigned, sizeof(assigned)) &&
             strcmp(assigned, event.object_id) == 0) {
             *result = pickupable;
-            LOG_INFO("event: drop %u created resource tech=%d", event.sequence, event.tech_type);
+            LOG_INFO("event: drop %u created item tech=%d", event.sequence, event.tech_type);
             return true;
         }
     }
@@ -3651,14 +3675,18 @@ bool spawn_missing_resource(const WorldEvent& event, const LocalState& local, vo
     return false;
 }
 
-bool apply_remote_event(const WorldEvent& event, const LocalState& local) {
+bool apply_remote_event(const WorldEvent& event, const LocalState& local, bool& initializing) {
     if (!g_pickup_set_visible || !g_set_position) {
         LOG_WARN("event: SetVisible/set_position unavailable, remote events ignored");
         return true;
     }
     if (!world_operations_ready()) return false;
+    const bool presence = item_drop_sync::locker_presence(event);
+    if (presence && !item_drop_sync::valid_spawn(event)) return true;
+    if (presence && !initializing && local.valid &&
+        !item_drop_sync::near_drop(event, local.x, local.y, local.z)) return true;
     void* pickupable = nullptr;
-    if (item_drop_sync::has_resource_identity(event) && g_unique_try_get &&
+    if (item_drop_sync::has_item_identity(event) && g_unique_try_get &&
         g_get_component && !g_get_component_is_string && g_pickupable_type &&
         g_pickup_get_tech && g_get_game_object && il2cpp_string_new) {
         uint8_t expected[16];
@@ -3672,14 +3700,28 @@ bool apply_remote_event(const WorldEvent& event, const LocalState& local) {
             pickupable = go ? g_get_component.call(go, g_pickupable_type, g_get_component.method) : nullptr;
             if (!pickupable || g_pickup_get_tech.call(pickupable, g_pickup_get_tech.method) !=
                                    static_cast<uint32_t>(event.tech_type)) {
-                LOG_WARN("event: resource %u identity belongs to a different object", event.sequence);
+                LOG_WARN("event: item %u identity belongs to a different object", event.sequence);
                 return true;
             }
         }
     } else {
         pickupable = find_pickupable_by_guid(event.guid);
     }
-    if (!pickupable && !spawn_missing_resource(event, local, &pickupable)) return false;
+    if (presence && pickupable && !initializing) return true;
+    if (!pickupable) {
+        if (!spawn_missing_item(event, local, &pickupable)) return false;
+        if (item_drop_sync::deployable_item(event.tech_type)) {
+            // In particular Gravsphere registers its dropped callback in Start.
+            // Let the prefab initialize before the queued retry calls Drop.
+            suppress_item(event.guid);
+            if (g_set_active) {
+                void* go = g_get_game_object.call(pickupable, g_get_game_object.method);
+                if (go) g_set_active.call(go, true, g_set_active.method);
+            }
+            initializing = true;
+            return false;
+        }
+    }
     void* game_object = g_get_game_object.call(pickupable, g_get_game_object.method);
     if (!game_object) return false;
 
@@ -3696,6 +3738,17 @@ bool apply_remote_event(const WorldEvent& event, const LocalState& local) {
         LOG_WARN("event: %s ignored, that object is in the local player's inventory",
                  event.kind == kWorldEventPickup ? "pickup" : "drop");
         return true;
+    }
+    if (event.tech_type == item_drop_sync::kWaterproofLocker) {
+        if (event.kind == kWorldEventPickup &&
+            (!waterproof_locker_empty(game_object)
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+             || contents_locker_busy(event.object_id)
+#endif
+            )) return false;
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+        waterproof_before_item_event(event);
+#endif
     }
 
     g_applying_remote++;
@@ -3737,7 +3790,24 @@ bool apply_remote_event(const WorldEvent& event, const LocalState& local) {
         Vector3 push{event.vx, event.vy, event.vz};
         g_pickup_drop_at.call(pickupable, position, push, false, g_pickup_drop_at.method);
         if (item_drop_sync::valid_spawn(event)) {
-            observe_remote_resource_drop(pickupable, event.guid);
+            if (item_drop_sync::deployable_item(event.tech_type) && g_get_go_transform && g_set_rotation) {
+                if (void* transform = g_get_go_transform.call(game_object, g_get_go_transform.method)) {
+                    g_set_rotation.call(transform, {event.qx, event.qy, event.qz, event.qw},
+                                        g_set_rotation.method);
+                }
+            }
+            if (event.tech_type == item_drop_sync::kVehicleBay && g_vehicle_bay_type &&
+                g_vehicle_bay_deploy && !g_get_component_is_string) {
+                if (void* bay = g_get_component.call(game_object, g_vehicle_bay_type, g_get_component.method)) {
+                    g_vehicle_bay_deploy.call(bay, item_drop_sync::vehicle_bay_deployed(event),
+                                              g_vehicle_bay_deploy.method);
+                }
+            }
+            observe_remote_item_drop(pickupable, event.guid);
+            if (event.tech_type == item_drop_sync::kWaterproofLocker) {
+                LOG_INFO("waterproof locker: placed replica id=%s peer=%08x recovery=%u",
+                         event.object_id, event.origin_id, unsigned(presence));
+            }
         }
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         fish_pickup_on_drop(pickupable);
@@ -3969,6 +4039,7 @@ constexpr double kEventRetryInterval = 0.5;
 struct PendingEvent {
     WorldEvent ev;
     bool used;
+    bool initializing;
     double deadline;
     double next_try;
 };
@@ -3985,6 +4056,7 @@ bool contents_locker_busy(const char* id);
 #include "build_sync.inc"
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
 #include "shared_progress.inc"
+#include "waterproof_locker_sync.inc"
 #include "locker_contents_sync.inc"
 void reset_boomerang_sync();
 #include "creature_probe.inc"
@@ -4007,6 +4079,12 @@ void pump_remote_events(const LocalState& local) {
     double now = monotonic_seconds();
 
     for (size_t i = 0; i < count; i++) {
+        if (events[i].kind == kWorldEventLockerMotion) {
+#if defined(SNMOD_BASE_GEOMETRY_APPLY)
+            waterproof_receive_motion(events[i]);
+#endif
+            continue;
+        }
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
         if(events[i].kind==kWorldEventLockerContents){contents_receive_frame(events[i]);continue;}
         if(events[i].kind==kWorldEventFishPickup){fish_pickup_receive_frame(events[i]);continue;}
@@ -4026,17 +4104,26 @@ void pump_remote_events(const LocalState& local) {
             build_handle_remove(events[i]);
             continue;
         }
+        bool already_pending = false;
+        const bool presence = item_drop_sync::locker_presence(events[i]);
         for (PendingEvent& slot : g_pending_events) {
-            if (slot.used && item_drop_sync::supersedes(events[i], slot.ev)) {
+            if (!slot.used) continue;
+            if (presence && !memcmp(events[i].guid, slot.ev.guid, sizeof(slot.ev.guid))) {
+                already_pending = true;
+                break;
+            }
+            if (item_drop_sync::supersedes(events[i], slot.ev)) {
                 slot.used = false;
             }
         }
-        if (apply_remote_event(events[i], local)) continue;
+        bool initializing = false;
+        if (already_pending || apply_remote_event(events[i], local, initializing)) continue;
         bool queued = false;
         for (PendingEvent& slot : g_pending_events) {
             if (slot.used) continue;
             slot.used = true;
             slot.ev = events[i];
+            slot.initializing = initializing;
             slot.deadline = now + kEventApplyRetrySeconds;
             slot.next_try = now + kEventRetryInterval;
             LOG_INFO("event: %s %u not in the scene yet, retrying for %.0f s",
@@ -4062,7 +4149,7 @@ void pump_remote_events(const LocalState& local) {
         }
         if (now < slot.next_try) continue;
         slot.next_try = now + kEventRetryInterval;
-        if (apply_remote_event(slot.ev, local)) {
+        if (apply_remote_event(slot.ev, local, slot.initializing)) {
             LOG_INFO("event: %s %u applied after retry",
                      slot.ev.kind == kWorldEventPickup ? "pickup" : "drop", slot.ev.sequence);
             slot.used = false;
@@ -4104,7 +4191,8 @@ void pump_remote_events(const LocalState& local) {
 //   within arm's reach of the local player.
 // ---------------------------------------------------------------------------
 
-constexpr size_t kItemScanLimit = 512;
+constexpr size_t kOrdinaryItemScanLimit = 512;
+constexpr size_t kItemScanLimit = kOrdinaryItemScanLimit + 64; // deployed tools outside the ordinary scan
 constexpr int kItemScanTick = 30;        // roughly once a second at 30 Hz
 constexpr int kItemSuppressedFrames = 90;  // three sweeps, long enough to cover the ones after
 constexpr float kItemReachLimit = 12.0f;   // metres; a pickup always happens within arm's reach
@@ -4119,7 +4207,9 @@ struct ItemMark {
     float z;
     Quaternion rotation;
     Vector3 velocity;
-    int32_t resource_tech;
+    int32_t replica_tech;
+    bool attached_deployable;
+    bool bay_deployed;
     char object_id[kWorldEventObjectIdSize];
     bool active;
     // True when the object sits anywhere under Inventory.main at the time of the sweep.
@@ -4200,7 +4290,16 @@ bool read_item_mark(void* pickupable, void* inventory_container, ItemMark* out) 
     out->live_pickup = pickupable;
     if (g_pickup_get_tech) {
         const int32_t tech = g_pickup_get_tech.call(pickupable, g_pickup_get_tech.method);
-        if (item_drop_sync::plain_resource(tech)) out->resource_tech = tech;
+        if (item_drop_sync::replicable_item(tech)) out->replica_tech = tech;
+        if (item_drop_sync::deployable_item(tech) && g_pickup_get_attached) {
+            out->attached_deployable = g_pickup_get_attached.call(pickupable, g_pickup_get_attached.method);
+        }
+        if (tech == item_drop_sync::kVehicleBay && g_vehicle_bay_type && g_vehicle_bay_deployed &&
+            il2cpp_field_get_value && g_get_component && !g_get_component_is_string) {
+            void* bay = g_get_component.call(game_object, g_vehicle_bay_type, g_get_component.method);
+            if (bay) il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(bay),
+                                            g_vehicle_bay_deployed, &out->bay_deployed);
+        }
     }
     out->active = g_go_get_active_self.call(game_object, g_go_get_active_self.method);
     if (inventory_container && g_pickup_inventory_item_field && g_inventory_item_owner_field) {
@@ -4238,7 +4337,7 @@ bool read_item_mark(void* pickupable, void* inventory_container, ItemMark* out) 
     return true;
 }
 
-void observe_remote_resource_drop(void* pickup, const uint8_t guid[16]) {
+void observe_remote_item_drop(void* pickup, const uint8_t guid[16]) {
     // Record the remote drop now so the next sweep can report a real pickup
     // even if the player grabs the resource before that sweep.
     if (!g_item_scan_ready) return;
@@ -4424,9 +4523,10 @@ void* fresh_pinned_id(const char* prefix, unsigned long index) {
     return value;
 }
 
-void send_item_event(const ItemMark& mark, uint8_t kind, bool allow_prefab_spawn = false) {
+void send_item_event(const ItemMark& mark, uint8_t kind, bool allow_prefab_spawn = false,
+                     bool locker_presence = false) {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
-    if (kind == kWorldEventDrop) {
+    if (kind == kWorldEventDrop && !locker_presence) {
         fish_pickup_on_drop(mark.live_pickup);
     }
 #endif
@@ -4444,13 +4544,43 @@ void send_item_event(const ItemMark& mark, uint8_t kind, bool allow_prefab_spawn
     event.vy = mark.velocity.y;
     event.vz = mark.velocity.z;
     // Preserve the exact identity even if the observed pickup has already been unloaded.
-    if (mark.resource_tech && (kind == kWorldEventPickup || allow_prefab_spawn)) {
-        event.tech_type = mark.resource_tech;
+    if (mark.replica_tech && (kind == kWorldEventPickup || allow_prefab_spawn)) {
+        event.tech_type = mark.replica_tech;
         memcpy(event.object_id, mark.object_id, sizeof(event.object_id));
+        if (kind == kWorldEventDrop && mark.bay_deployed) event.build_flags = item_drop_sync::kBayDeployed;
+    }
+    if (locker_presence) {
+        event.build_flags = item_drop_sync::kLockerEnsurePresent;
+        if (!item_drop_sync::locker_presence(event) || !item_drop_sync::valid_spawn(event)) return;
     }
     // already_applied is true: this phone's own game just made the change, so it must not act
     // on the event when it comes back from a peer.
     net_post_world_event(event, true);
+}
+
+void recover_nearby_lockers(const ItemMark* marks, size_t count) {
+    if (!g_role_known || !g_local_is_host || !count || net_pending_world_event_count() >= 8) return;
+    PeerState peers[kMaxPeers]{};
+#if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
+    const size_t peer_count = net_copy_world_peers(peers, kMaxPeers);
+#else
+    const size_t peer_count = net_copy_peers(peers, kMaxPeers);
+#endif
+    static size_t cursor = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& mark = marks[cursor++ % count];
+        if (mark.replica_tech != item_drop_sync::kWaterproofLocker || !mark.active ||
+            mark.in_inventory || mark.attached_deployable || item_is_suppressed(mark.guid)) continue;
+        WorldEvent pose{};
+        pose.x = mark.x; pose.y = mark.y; pose.z = mark.z;
+        for (size_t p = 0; p < peer_count; ++p) {
+            const auto& peer = peers[p];
+            if (peer.seq_valid && item_drop_sync::near_drop(pose, peer.x, peer.y, peer.z)) {
+                send_item_event(mark, kWorldEventDrop, true, true);
+                return;
+            }
+        }
+    }
 }
 
 // One sweep. An object that went from active to inactive was picked up; one that went the other
@@ -4471,13 +4601,18 @@ void scan_items(bool emit) {
     ItemMark now[kItemScanLimit];
     size_t now_count = 0;
     int32_t count = g_array_get_length.call(list, g_array_get_length.method);
-    if (count > static_cast<int32_t>(kItemScanLimit)) count = static_cast<int32_t>(kItemScanLimit);
+    if ((!emit || !g_pickup_get_tech) && count > static_cast<int32_t>(kOrdinaryItemScanLimit)) {
+        count = static_cast<int32_t>(kOrdinaryItemScanLimit);
+    }
     void* inventory = read_static_object_field(g_inventory_class, "main");
     void* container = inventory && g_inventory_get_container
         ? g_inventory_get_container.call(inventory, g_inventory_get_container.method) : nullptr;
 
-    for (int32_t i = 0; i < count; i++) {
+    for (int32_t i = 0; i < count && now_count < kItemScanLimit; i++) {
         void* item = g_array_get_value.call(list, i, g_array_get_value.method);
+        if (!item) continue;
+        if (i >= static_cast<int32_t>(kOrdinaryItemScanLimit) &&
+            !item_drop_sync::deployable_item(g_pickup_get_tech.call(item, g_pickup_get_tech.method))) continue;
         ItemMark mark{};
         if (!read_item_mark(item, container, &mark)) continue;
         now[now_count++] = mark;
@@ -4485,17 +4620,31 @@ void scan_items(bool emit) {
 
     if (emit && g_item_scan_ready) {
         for (size_t i = 0; i < now_count; i++) {
-            if (!now[i].active || now[i].in_inventory) continue;
+            if (!now[i].active || now[i].in_inventory || now[i].attached_deployable) continue;
             const ItemMark* previous = nullptr;
             for (size_t j = 0; j < g_items_seen_count; j++) {
                 if (!mark_matches(g_items_seen[j], now[i].guid)) continue;
                 previous = &g_items_seen[j];
                 break;
             }
-            if (!previous || (previous->active && !previous->in_inventory)) continue;
-            if (!within_reach(now[i]) || item_is_suppressed(now[i].guid)) continue;
-            LOG_INFO("event: local drop detected");
-            send_item_event(now[i], kWorldEventDrop, previous->in_inventory);
+            if (!previous) {
+                // A freshly crafted locker can enter this list already placed.
+                // Announce it without moving any copy the other phone already loaded.
+                if (now[i].replica_tech == item_drop_sync::kWaterproofLocker &&
+                    within_reach(now[i]) && !item_is_suppressed(now[i].guid)) {
+                    LOG_INFO("waterproof locker: first world observation id=%s", now[i].object_id);
+                    send_item_event(now[i], kWorldEventDrop, true, true);
+                }
+                continue;
+            }
+            if (previous->active && !previous->in_inventory &&
+                !previous->attached_deployable) continue;
+            const bool deployed = item_drop_sync::deployable_item(now[i].replica_tech);
+            // The released tool may have travelled beyond reach since the last sweep.
+            if ((!within_reach(now[i]) && !(deployed && previous->in_inventory)) ||
+                item_is_suppressed(now[i].guid)) continue;
+            LOG_INFO("event: local drop detected tech=%d", now[i].replica_tech);
+            send_item_event(now[i], kWorldEventDrop, previous->in_inventory || deployed);
         }
         for (size_t j = 0; j < g_items_seen_count; j++) {
             if (!g_items_seen[j].active) continue;
@@ -4503,7 +4652,7 @@ void scan_items(bool emit) {
             bool still_in_world = false;
             for (size_t i = 0; i < now_count; i++) {
                 if (mark_matches(now[i], g_items_seen[j].guid) &&
-                    now[i].active && !now[i].in_inventory) {
+                    now[i].active && !now[i].in_inventory && !now[i].attached_deployable) {
                     still_in_world = true;
                     break;
                 }
@@ -4513,13 +4662,14 @@ void scan_items(bool emit) {
             // quickslots makes it go inactive, which reads as a pickup; but the item was riding
             // the camera when it was last seen, so it never left the holder's hands. A real
             // pickup was last seen active out in the world.
-            if (g_items_seen[j].in_inventory) continue;
+            if (g_items_seen[j].in_inventory || g_items_seen[j].attached_deployable) continue;
             if (!within_reach(g_items_seen[j]) || item_is_suppressed(g_items_seen[j].guid)) {
                 continue;
             }
             LOG_INFO("event: local pickup detected");
             send_item_event(g_items_seen[j], kWorldEventPickup);
         }
+        recover_nearby_lockers(now, now_count);
     }
 
     memcpy(g_items_seen, now, sizeof(ItemMark) * now_count);
@@ -4531,6 +4681,10 @@ void scan_items(bool emit) {
 // Called from hooked_player_update. The first sweep only records the baseline; reporting it
 // would send the whole world to the peers as a stream of drops.
 void tick_item_scan(const LocalState& local) {
+    if (!local.valid) {
+        g_item_scan_ready = false;
+        return;
+    }
     log_inventory_topology_once();
     if (g_applying_remote != 0) return;
     g_item_origin.x = local.x;
@@ -4783,21 +4937,13 @@ void log_vehicle_sky_candidates(void* copy_go) {
     }
 }
 
-// Reads UniqueIdentifier.Id off any component's GameObject. Vehicles are not Pickupables, so
-// pickup_guid cannot take them; the hash agrees on both ends like every other guid here.
-bool component_guid(void* component, uint8_t out[16]) {
-    if (!component || !g_unique_get_id || !g_get_component || !g_unique_identifier_type) {
-        return false;
-    }
-    void* game_object = g_get_game_object.call(component, g_get_game_object.method);
-    if (!game_object) return false;
-    void* identifier = g_get_component.call(game_object, g_unique_identifier_type,
-                                            g_get_component.method);
-    if (!identifier) return false;
-    void* text = g_unique_get_id.call(identifier, g_unique_get_id.method);
-    char ascii[128];
-    if (!string_to_ascii(text, ascii, sizeof(ascii))) return false;
+// The identifier lookup works for any component on the object's root.
+bool component_guid(void* component, uint8_t out[16],
+                    char (*object_id)[kVehicleObjectIdSize] = nullptr) {
+    char ascii[kVehicleObjectIdSize]{};
+    if (!pickup_id(component, ascii, sizeof(ascii))) return false;
     guid_from_string(ascii, out);
+    if (object_id) memcpy(*object_id, ascii, sizeof(ascii));
     return true;
 }
 
@@ -4836,8 +4982,8 @@ struct DrivenVehicle {
     // local match; today it is diagnostic only.
     char classId[16];
     void* game_object;
-    // True when game_object is our own prefab spawn (destroy with the slot).
-    // False for guid-matched world objects, which must never be destroyed.
+    // True only for disposable visual replicas. A driveable Seamoth belongs
+    // to the local world once it is registered, just like a saved vehicle.
     bool spawned;
     // Last frame the peer's STATE still carried the piloting flag. A single
     // reordered STATE clears the bit and must not instantly destroy the copy
@@ -4869,6 +5015,9 @@ static DrivenVehicle g_driven[4];
 static uint8_t g_my_vehicle_guid[16];
 static bool g_my_vehicle_valid = false;
 static void* g_my_vehicle_object = nullptr;
+static void* g_seamoth_type = nullptr;
+static Entry<void (*)(void*, void*)> g_register_vehicle_entity;
+static Entry<void (*)(void*, uint32_t, void*)> g_notify_vehicle_crafted;
 
 bool is_cyclops_subroot(void* sub) {
     if (!g_subroot_is_cyclops || !il2cpp_field_get_value || !g_build_alive || !build_live(sub))
@@ -4894,7 +5043,7 @@ void release_driven(DrivenVehicle* slot, const char* why) {
         slot->game_object = nullptr;
     }
     if (slot->game_object && slot->have_kinematic &&
-        (!is_cyclops_vehicle(slot->classId) || build_live(slot->game_object)) &&
+        (!g_build_alive || build_live(slot->game_object)) &&
         g_rigidbody_type && g_get_component &&
         !g_get_component_is_string && g_rb_set_kinematic) {
         void* body =
@@ -4910,6 +5059,17 @@ void release_driven(DrivenVehicle* slot, const char* why) {
         LOG_INFO("veh: released pilot %08x (%s)", slot->pilot, why);
     }
     memset(slot, 0, sizeof(*slot));
+}
+
+void bind_driven_vehicle(DrivenVehicle& slot, void* go) {
+    slot.game_object = go;
+    if (!g_rigidbody_type || !g_get_component || g_get_component_is_string ||
+        !g_rb_get_kinematic || !g_rb_set_kinematic) return;
+    if (void* body = g_get_component.call(go, g_rigidbody_type, g_get_component.method)) {
+        slot.was_kinematic = g_rb_get_kinematic.call(body, g_rb_get_kinematic.method);
+        slot.have_kinematic = true;
+        g_rb_set_kinematic.call(body, true, g_rb_set_kinematic.method);
+    }
 }
 
 void clear_driven_vehicles() {
@@ -5621,13 +5781,62 @@ void verify_vehicle_sky(DrivenVehicle* slot) {
     slot->sky_verified = true;
 }
 
-// Instantiates a visual copy of a vehicle the local save never had (diverged worlds:
+bool spawn_driveable_seamoth(DrivenVehicle& slot, const VehicleState& state, void* prefab, uint32_t tech) {
+    if (!state.object_id[0] || !g_seamoth_type || g_get_component_is_string || !g_unique_try_get ||
+        !g_uid_set_id || !g_register_vehicle_entity || !g_notify_vehicle_crafted ||
+        !g_object_destroy || !il2cpp_string_new) return true;
+    uint8_t expected[16];
+    guid_from_string(state.object_id, expected);
+    if (memcmp(expected, state.guid, sizeof(expected))) return true;
+    ManagedRoot id;
+    if (!prefab_retain(id, il2cpp_string_new(state.object_id))) return false;
+
+    // The saved object may have streamed in while the prefab request was pending.
+    void* registered = nullptr;
+    if (g_unique_try_get.call(id.get(), &registered, g_unique_try_get.method)) {
+        void* go = registered ? g_get_game_object.call(registered, g_get_game_object.method) : nullptr;
+        if (go && g_get_component.call(go, g_seamoth_type, g_get_component.method)) bind_driven_vehicle(slot, go);
+        return true;
+    }
+
+    const Vector3 position{state.x, state.y, state.z};
+    const Quaternion rotation{0, 0, 0, 1};
+    void* go = g_instantiate.call(prefab, position, rotation, g_instantiate.method);
+    if (!go) return false;
+    void* vehicle = g_get_component.call(go, g_seamoth_type, g_get_component.method);
+    void* uid = pickup_identifier(vehicle);
+    if (!uid) {
+        g_object_destroy.call(go, g_object_destroy.method);
+        return true;
+    }
+    g_uid_set_id.call(uid, id.get(), g_uid_set_id.method);
+    char assigned[kVehicleObjectIdSize]{};
+    if (!pickup_id(vehicle, assigned, sizeof(assigned)) || strcmp(assigned, state.object_id)) {
+        g_object_destroy.call(go, g_object_destroy.method);
+        return true;
+    }
+
+    if (g_set_euler) {
+        if (void* transform = g_get_go_transform.call(go, g_get_go_transform.method)) {
+            g_set_euler.call(transform, {state.pitch, state.yaw, state.roll}, g_set_euler.method);
+        }
+    }
+    bind_driven_vehicle(slot, go);
+    g_set_active.call(go, true, g_set_active.method);
+    g_register_vehicle_entity.call(go, g_register_vehicle_entity.method);
+    // Native construction prepares the starter power cell and the storage components.
+    g_notify_vehicle_crafted.call(go, tech, g_notify_vehicle_crafted.method);
+    LOG_INFO("veh: created driveable SeaMoth for pilot %08x", slot.pilot);
+    return true;
+}
+
+// Instantiates a copy of a vehicle the local save never had (diverged worlds:
 // the peer built or drives something absent here). Mirrors spawn_held_prop: park
 // inactive, disable the driver script, kinematic bodies, dead colliders - then the
 // received poses drive the copy. Returns true when settled
 // (spawned, or hopeless so the caller stops retrying); false when an async prefab
 // load is still in flight and the caller should try again later.
-bool spawn_driven_from_prefab(DrivenVehicle* slot) {
+bool spawn_driven_from_prefab(DrivenVehicle* slot, const VehicleState& state) {
     if (!slot || slot->game_object) return true;
     uint32_t tech = vehicle_tech_for_class(slot->classId);
     if (!tech) return true;  // unknown class; nothing will ever make this work
@@ -5637,6 +5846,7 @@ bool spawn_driven_from_prefab(DrivenVehicle* slot) {
     }
     void* prefab = find_prefab_source(tech);
     if (!prefab) return false;
+    if (is_seamoth_vehicle(slot->classId)) return spawn_driveable_seamoth(*slot, state, prefab, tech);
     log_vehicle_prefab_sky(tech, prefab);
     Vector3 position{0.0f, 0.0f, 0.0f};
     Quaternion rotation{0.0f, 0.0f, 0.0f, 1.0f};
@@ -5717,7 +5927,8 @@ void publish_local_vehicle(void* player_self, uint32_t flags) {
     void* go = g_get_game_object.call(vehicle, g_get_game_object.method);
     g_my_vehicle_object = go;
     VehicleState out{};
-    if (!go || !(cyclops ? avatar_environment_id(go, out.guid) : component_guid(vehicle, out.guid))) {
+    if (!go || !(cyclops ? avatar_environment_id(go, out.guid) :
+                            component_guid(vehicle, out.guid, &out.object_id))) {
         stop_publishing_vehicle();
         return;
     }
@@ -5902,7 +6113,7 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
             release_driven(slot, "locally piloted");
             continue;
         }
-        if (cyclops && slot->game_object && !build_live(slot->game_object)) {
+        if (shared_controls && slot->game_object && g_build_alive && !build_live(slot->game_object)) {
             slot->game_object = nullptr;
             slot->have_kinematic = false;
             slot->have_seq = false;
@@ -5931,7 +6142,7 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
             if (preq && preq->request.get() && !preq->prefab.get()) {
                 // A prefab load fired earlier is still in flight: poll it every frame
                 // (cheap slot lookup, no scene scan). The copy pops in on arrival.
-                bool settled = spawn_driven_from_prefab(slot);
+                bool settled = spawn_driven_from_prefab(slot, state);
                 if (slot->game_object) {
                     // spawned — fall through to the first pose
                 } else {
@@ -5943,7 +6154,7 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
                 void* go = find_object_by_guid(slot->guid);
                 if (!go) {
                     slot->next_resolve_frame = g_avatar_frame + 900;  // ~30 s
-                    if (!spawn_driven_from_prefab(slot) || !slot->game_object) {
+                    if (!spawn_driven_from_prefab(slot, state) || !slot->game_object) {
                         LOG_INFO("veh: no local vehicle for pilot %08x yet (class %.15s), "
                                  "retrying",
                                  slot->pilot, slot->classId);
@@ -5951,17 +6162,10 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
                     }
                     // spawned — fall through to the first pose
                 } else {
-                    slot->game_object = go;
-                    if (g_rigidbody_type && g_get_component && !g_get_component_is_string) {
-                        void* body = g_get_component.call(go, g_rigidbody_type,
-                                                         g_get_component.method);
-                        if (body && g_rb_get_kinematic && g_rb_set_kinematic) {
-                            slot->was_kinematic =
-                                g_rb_get_kinematic.call(body, g_rb_get_kinematic.method);
-                            slot->have_kinematic = true;
-                            g_rb_set_kinematic.call(body, true, g_rb_set_kinematic.method);
-                        }
-                    }
+                    if (is_seamoth_vehicle(slot->classId) &&
+                        (!g_seamoth_type || g_get_component_is_string ||
+                         !g_get_component.call(go, g_seamoth_type, g_get_component.method))) continue;
+                    bind_driven_vehicle(*slot, go);
                     LOG_INFO("veh: driving for pilot %08x", slot->pilot);
                 }
             }
@@ -5994,15 +6198,20 @@ void tick_remote_vehicles(const PeerState* peers, size_t peer_count) {
             release_driven(slot, "pilot gone");
         } else {
             const bool piloting = (pilot->flags & kFlagPiloting) != 0;
+            const bool confirmed_exit = !piloting && pilot->seq_valid && slot->have_seq &&
+                vehicle_sequence_newer(pilot->sequence, slot->last_seq);
             if (piloting) slot->last_piloting_frame = g_avatar_frame;
-            if (!piloting &&
+            if (is_seamoth_vehicle(slot->classId) && confirmed_exit) {
+                if (slot->motion.initialized && !slot->motion.settled) {
+                    apply_interpolated_vehicle_pose(*slot, now);
+                }
+                if (!slot->motion.initialized || slot->motion.settled) release_driven(slot, "exited");
+            } else if (!piloting &&
                 g_avatar_frame - slot->last_piloting_frame > 120) {  // ~4 s grace
                 release_driven(slot, "exited");
             } else if (g_avatar_frame - slot->last_seq_frame > 180) {
                 release_driven(slot, "stale");
-            } else if (!piloting && pilot->seq_valid && slot->have_seq &&
-                       vehicle_sequence_newer(pilot->sequence, slot->last_seq) &&
-                       slot->motion.initialized && !slot->motion.settled) {
+            } else if (confirmed_exit && slot->motion.initialized && !slot->motion.settled) {
                 // Finish the last accepted blend when the pilot gets out.
                 apply_interpolated_vehicle_pose(*slot, now);
             }
@@ -6149,6 +6358,7 @@ void reset_prefab_requests() {
     g_guest_inventory_identity_ready = false;
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
     reset_shared_progress();
+    reset_waterproof_motion();
 #endif
     LOG_INFO("prefab requests: cleared GC roots for world transition");
 }
@@ -6944,6 +7154,14 @@ void resolve_item_api() {
     g_pickup_set_visible.bind(find_method(pickupable, "SetVisible", 1));
 
     if (il2cpp_class_get_type && il2cpp_type_get_object) {
+        if (auto* bay = find_class_in_domain("", "Constructor")) {
+            g_vehicle_bay_type = il2cpp_type_get_object(il2cpp_class_get_type(bay));
+            g_vehicle_bay_deployed = build_field_on(bay, "deployed", 0x1a1);
+            g_vehicle_bay_deploy.bind(find_method_typed(bay, "Deploy", 1, "system.boolean"));
+        }
+        if (auto* seamoth = find_class_in_domain("", "SeaMoth")) {
+            g_seamoth_type = il2cpp_type_get_object(il2cpp_class_get_type(seamoth));
+        }
         g_unique_identifier_type =
             il2cpp_type_get_object(il2cpp_class_get_type(g_unique_identifier_class));
         g_pickupable_type = il2cpp_type_get_object(il2cpp_class_get_type(pickupable));
@@ -7042,6 +7260,12 @@ void resolve_item_api() {
     if (craftdata) {
         g_craft_get_class_id.bind(find_method(craftdata, "GetClassIdForTechType", 1));
     }
+    g_notify_vehicle_crafted.bind(find_method_typed(find_class_in_domain("", "CrafterLogic"),
+                                                    "NotifyCraftEnd", 2, "unityengine.gameobject"));
+    g_register_vehicle_entity.bind(find_method_typed(find_class_in_domain("", "LargeWorldEntity"),
+                                                     "Register", 1, "unityengine.gameobject"));
+    LOG_INFO("vehicle api: SeaMoth type=%p NotifyCraftEnd=%u Register=%u",
+             g_seamoth_type, unsigned(bool(g_notify_vehicle_crafted)), unsigned(bool(g_register_vehicle_entity)));
     // TryGetScenePrefab lives on ScenePrefabDatabase, not on CraftData (dump line ~473292).
     struct Il2CppClass* prefabdb = find_class_in_domain("", "ScenePrefabDatabase");
     if (prefabdb) {
@@ -7286,7 +7510,7 @@ void hooked_player_update(void* self, void* method) {
     }
     // The sweep runs after the pump so a remote event is applied first and is part of this
     // tick's snapshot rather than being seen as a change on the next one.
-    tick_item_scan(local);
+    tick_item_scan(published);
 
     // Build sync v1: guests apply queued snapshots, the host scans and publishes its own.
     // Resolves its API lazily on the first call, so nothing extra happens at install time.
@@ -7294,6 +7518,7 @@ void hooked_player_update(void* self, void* method) {
 #if defined(SNMOD_BASE_GEOMETRY_APPLY)
     tick_shared_progress(published);
     tick_locker_contents(local);
+    tick_waterproof_motion(published);
     if(!tick_creature_motion_probe(local))tick_creature_probe(local);
     tick_boomerang_sync(published, g_creature_motion_probe.armed || g_creature_probe.requested || g_creature_probe.active);
     tick_fish_pickup(published);
@@ -7532,7 +7757,8 @@ void world_context_tick(void* manager) {
         il2cpp_field_static_get_value(g_menu_main_field,&menu);
         if(menu) il2cpp_field_get_value(reinterpret_cast<Il2CppObject*>(menu),g_menu_starting_field,&starting);
     }
-    const bool at_menu=menu && !loading && !starting && !daynight_instance();
+    const bool playing = !loading && daynight_instance() != nullptr;
+    const bool at_menu=menu && !loading && !starting && !playing;
     static double next_backup_access = 0;
     if (at_menu && monotonic_seconds() >= next_backup_access) {
         next_backup_access = monotonic_seconds() + 10;
@@ -7554,6 +7780,7 @@ void world_context_tick(void* manager) {
             g_world_context_generation,slot,unsigned(loading),unsigned(at_menu));
     }
     if(at_menu) net_session_set_world_active(false);
+    net_lobby_menu_tick(at_menu, playing);
     launch_role_bridge_tick(at_menu);
 }
 void world_notice_tick() {

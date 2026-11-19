@@ -12,8 +12,12 @@ final class SaveBridge implements AutoCloseable {
     static final Semaphore SERVICE_LOCK=new Semaphore(1,true);
     final Shizuku.UserServiceArgs args;
     final ServiceConnection connection;
-    IBinder binder;
+    volatile IBinder binder;
     boolean locked;
+    static final class UnavailableException extends IOException {
+        UnavailableException(String message) { super(message); }
+        UnavailableException(String message, Throwable cause) { super(message, cause); }
+    }
     static String readiness() {
         try {
             if(!Shizuku.pingBinder()) return "Запустите Shizuku и вернитесь сюда";
@@ -23,7 +27,7 @@ final class SaveBridge implements AutoCloseable {
         } catch(RuntimeException e) { return "Shizuku недоступен: "+e.getMessage(); }
     }
     SaveBridge(Context context) throws Exception {
-        String blocked=readiness(); if(blocked!=null) throw new IOException(blocked);
+        String blocked=readiness(); if(blocked!=null) throw new UnavailableException(blocked);
         if(!SERVICE_LOCK.tryAcquire(25,TimeUnit.SECONDS)) throw new IOException("Служба Shizuku занята другой проверкой. Повторите операцию");
         locked=true;
         CountDownLatch ready=new CountDownLatch(1);
@@ -34,8 +38,13 @@ final class SaveBridge implements AutoCloseable {
             public void onServiceDisconnected(ComponentName name) { binder=null; }
         };
         try {
-            Shizuku.bindUserService(args,connection);
-            if(!ready.await(20,TimeUnit.SECONDS) || binder==null) throw new IOException("Не удалось подключить службу копирования Shizuku");
+            try {
+                Shizuku.bindUserService(args,connection);
+            } catch (RuntimeException error) {
+                throw new UnavailableException("Не удалось запустить службу копирования Shizuku", error);
+            }
+            if(!ready.await(20,TimeUnit.SECONDS) || binder==null)
+                throw new UnavailableException("Служба копирования Shizuku не ответила");
             if(transact(SaveAccessService.CHECK_ACCESS,null).getInt("callerUid")!=android.os.Process.myUid())
                 throw new IOException("Shizuku подключил службу другого профиля Android");
         } catch(Exception error) { close(); throw error; }

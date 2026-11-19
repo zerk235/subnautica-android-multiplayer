@@ -10,6 +10,7 @@ import java.util.UUID;
 
 final class SaveManager {
     static final Object INDEX_LOCK=new Object();
+    static final String SKIP_RESTORE_TARGET = "skipRestoreTarget";
     final Context context;
     final File folder;
     final AtomicFile index;
@@ -74,7 +75,9 @@ final class SaveManager {
             .put("files",checked.getJSONObject("files").length()).put("bytes",checked.getLong("bytes"))
             .put("sourceCert",cert).put("sourceUid",game.applicationInfo.uid).put("createdAt",System.currentTimeMillis())
             .put("serviceUid",remote.getInt("serviceUid")).put("verified",true);
-        save(record); return record;
+        save(record);
+        context.getSharedPreferences("status", 0).edit().remove("restoreRequired").remove(SKIP_RESTORE_TARGET).apply();
+        return record;
     }
     JSONObject importArchive(InputStream input) throws Exception {
         if(!folder.isDirectory() && !folder.mkdirs()) throw new IOException("Не удалось создать папку копий");
@@ -95,7 +98,9 @@ final class SaveManager {
             .put("files",checked.getJSONObject("files").length()).put("bytes",checked.getLong("bytes"))
             .put("sourceCert",game==null?"":PatchEngine.certificate(game)).put("sourceUid",game==null?-1:game.applicationInfo.uid)
             .put("createdAt",System.currentTimeMillis()).put("imported",true).put("verified",true);
-        save(record); return record;
+        save(record);
+        context.getSharedPreferences("status", 0).edit().remove(SKIP_RESTORE_TARGET).apply();
+        return record;
     }
     String checkRemoval(ApkPatcher.Progress progress) throws Exception {
         PatchEngine engine=new PatchEngine(context); JSONObject plan=engine.plan(); PackageInfo game=engine.installed();
@@ -112,9 +117,13 @@ final class SaveManager {
     }
     boolean needsRestore() throws Exception { return needsRestore(latest(),new PatchEngine(context).installed()); }
     boolean needsRestore(JSONObject record,PackageInfo game) throws Exception {
-        return record!=null && game!=null && (context.getSharedPreferences("status",0).getBoolean("restoreRequired",false)
-            || (!record.getString("sourceCert").equals(PatchEngine.certificate(game))
-            && !record.optString("restoredCert","").equals(PatchEngine.certificate(game))));
+        if (record == null || game == null || !PatchEngine.GAME_VERSION.equals(game.versionName)) return false;
+        String cert = PatchEngine.certificate(game);
+        android.content.SharedPreferences status = context.getSharedPreferences("status", 0);
+        if (PatchEngine.targetIdentity(game.versionName, game.getLongVersionCode(), cert)
+                .equals(status.getString(SKIP_RESTORE_TARGET, ""))) return false;
+        return status.getBoolean("restoreRequired", false)
+            || (!record.getString("sourceCert").equals(cert) && !record.optString("restoredCert", "").equals(cert));
     }
     JSONObject restore() throws Exception {
         JSONObject record=verify(); PackageInfo game=new PatchEngine(context).installed();
@@ -125,7 +134,7 @@ final class SaveManager {
             throw new IOException("Восстановление не подтверждено. Резервная копия сохранена");
         record.put("restoredCert",PatchEngine.certificate(game)).put("restoredAt",System.currentTimeMillis());
         save(record);
-        if(!context.getSharedPreferences("status",0).edit().remove("restoreRequired").commit())
+        if(!context.getSharedPreferences("status",0).edit().remove("restoreRequired").remove(SKIP_RESTORE_TARGET).commit())
             throw new IOException("Миры записаны, но не удалось сохранить результат восстановления. Резервная копия сохранена");
         return report;
     }

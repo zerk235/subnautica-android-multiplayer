@@ -128,7 +128,11 @@ void fish_pickup_ui(void* reticle) {
     BoomerangReplica* chosen=nullptr;
     BoomerangReplica* recent=nullptr;
     for(auto& r:g_boomerang.replicas) {
-        if(!r.handle||r.hidden||!r.written||r.receiver.age(now)>.5||fish_pickup_suppressed(r.identity))continue;
+        // Keep the reticle usable for as long as the guest still sees this
+        // fish. The host validates its current position before granting pickup.
+        if(!r.handle||r.hidden||!r.written||
+           boomerang_sync::hidden(r.receiver.has_pose(),r.receiver.age(now))||
+           fish_pickup_suppressed(r.identity))continue;
         const auto pos=r.last_written;
         float dx=pos.x-origin.x,dy=pos.y-origin.y,dz=pos.z-origin.z;
         const float along=dx*forward.x+dy*forward.y+dz*forward.z;

@@ -7,7 +7,7 @@ public final class GamePackageReceiver extends BroadcastReceiver {
         if(intent.getData()==null || !PatchEngine.GAME.equals(intent.getData().getSchemeSpecificPart())) return;
         if(Intent.ACTION_PACKAGE_REMOVED.equals(intent.getAction()) && !intent.getBooleanExtra(Intent.EXTRA_REPLACING,false)) {
             context.getSharedPreferences("status",0).edit().putBoolean("restoreRequired",true).apply();
-            PatchService.status(context,"Игра удалена в текущем профиле. Подготовленные APK и проверенная копия миров остаются в установщике. После установки восстановите миры.");
+            PatchService.status(context,"Игра удалена в текущем профиле. Вернитесь в патчер и установите подготовленный мод.");
         }
     }
 }

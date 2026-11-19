@@ -1,9 +1,11 @@
 package io.github.zerk235.snmp.installer;
 
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -97,6 +99,22 @@ final class Ui {
         b.setPadding(dp(c, 20), dp(c, 12), dp(c, 20), dp(c, 12));
         b.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return b;
+    }
+
+    static void installPrimary(Context context, Button button) {
+        button.setTextColor(Color.WHITE);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x35bdf8ff),
+            lagoonSurface(context, 24, true), null));
+        button.setMinHeight(dp(context, 48));
+    }
+
+    static GradientDrawable lagoonSurface(Context context, int radius, boolean active) {
+        GradientDrawable surface = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, active
+            ? new int[]{0xff08798a, 0xff03465b, 0xff076c7e}
+            : new int[]{0xec123b50, 0xf0092538});
+        surface.setCornerRadius(dp(context, radius));
+        surface.setStroke(dp(context, 1), active ? 0xff63eafa : 0xff367e95);
+        return surface;
     }
 
     /** Small status chip, e.g. "Активный" / "Не подключено". */

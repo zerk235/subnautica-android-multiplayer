@@ -1,4 +1,5 @@
 #include "launch_role_bridge.h"
+#include "lobby_ui_bridge.h"
 #include "net.h"
 #include "log.h"
 #include <cstdio>
@@ -37,7 +38,7 @@ void persist(SessionLaunchRole role) {
     if(std::fclose(file)!=0)ok=false;
     if(!ok || std::rename(temp,preference)!=0){unlink(temp);LOG_WARN("launch role: preference could not be committed");}
 }
-void poll_intent() {
+void poll_intent(bool at_menu) {
     if(!machine || !unity || !activity_field)return;
     JNIEnv* env=nullptr;bool attached=false;
     jint state=machine->GetEnv(reinterpret_cast<void**>(&env),JNI_VERSION_1_6);
@@ -46,6 +47,7 @@ void poll_intent() {
     if(env->PushLocalFrame(16)==0) {
         jobject activity=env->GetStaticObjectField(unity,activity_field);
         if(!clear_exception(env) && activity) {
+            lobby_ui_tick(env,activity,at_menu);
             jclass activity_class=env->GetObjectClass(activity);
             jmethodID get_intent=env->GetMethodID(activity_class,"getIntent","()Landroid/content/Intent;");
             if(!clear_exception(env) && get_intent) {
@@ -83,14 +85,15 @@ void launch_role_bridge_init(JavaVM* vm,JNIEnv* env) {
     }
     int role=0;FILE* file=std::fopen(preference,"r");
     if(file){if(std::fscanf(file,"%d",&role)==1 && role>=0 && role<=2){requested=SessionLaunchRole(role);pending=true;}std::fclose(file);}
-    launch_role_bridge_tick(true);
+    launch_role_bridge_tick(false);
 }
 
 void launch_role_bridge_tick(bool at_menu) {
-    // SaveLoadManager.Update runs on Unity's attached game thread. Avoid JNI work
-    // every frame; no Android view or gameplay object is modified here.
+    // The menu panel updates on Android's UI thread. Role changes stay on Unity's thread.
     static unsigned frame=0;
-    if((frame++%30)==0)poll_intent();
+    static bool was_at_menu=false;
+    if((frame++%12)==0 || at_menu!=was_at_menu)poll_intent(at_menu);
+    was_at_menu=at_menu;
     if(pending && at_menu && net_session_choose_role(requested)) {
         persist(requested);pending=false;
         LOG_INFO("launch role: applied in menu role=%s",requested==kLaunchHost ? "host" : requested==kLaunchGuest ? "guest" : "auto");

@@ -24,9 +24,9 @@ constexpr double kHelloInterval = 1.0;
 constexpr double kStateInterval = 0.05;  // 20 Hz
 constexpr double kVehicleInterval = 0.1;  // 10 Hz
 #if defined(SNMOD_BASE_GEOMETRY_CAPTURE)
-constexpr uint16_t kSessionProtocolVersion = 41;  // Stalker poses and bites
+constexpr uint16_t kSessionProtocolVersion = 45;  // Recover missing waterproof lockers
 #else
-constexpr uint16_t kSessionProtocolVersion = 10;  // interior event tail without geometry capture
+constexpr uint16_t kSessionProtocolVersion = 13;  // Recover missing waterproof lockers without geometry capture
 #endif
 constexpr size_t kMaxSessionCandidates = kMaxPeers;
 
@@ -213,6 +213,32 @@ bool net_session_guest_world(const char* slot, uint8_t out_guid[16]);
 // device already has a loaded world. Leave is explicit; returning to the menu is not leave.
 bool net_session_join(uint32_t host_id, const uint8_t session_id[16]);
 void net_session_leave();
+
+enum LobbyView { kLobbyEntry, kLobbyBrowse, kLobbyHost, kLobbyGuest, kLobbyChooseWorld, kLobbyWaiting };
+struct LobbyRoom {
+    uint32_t host;
+    uint32_t room;
+};
+struct LobbyStatus {
+    LobbyView view;
+    uint32_t room;
+    uint32_t host;
+    uint32_t guest;
+    bool host_ready;
+    bool guest_ready;
+    bool can_start;
+    bool room_lost;
+    LobbyRoom rooms[kMaxPeers];
+    size_t count;
+};
+void net_lobby_snapshot(LobbyStatus* out);
+void net_lobby_open();
+void net_lobby_create();
+void net_lobby_enter(uint32_t host, uint32_t room);
+void net_lobby_toggle_ready();
+void net_lobby_start();
+void net_lobby_close();
+void net_lobby_menu_tick(bool at_menu, bool playing);
 bool net_session_choose_role(SessionLaunchRole role);
 
 // Game-thread context setter. content_guid is the 16-byte gameinfo.json session GUID;
@@ -227,15 +253,17 @@ void net_session_set_world_active(bool active);
 // ---------------------------------------------------------------------------
 // Vehicle sync
 //
-// Whoever pilots a Seamoth/Prawn publishes its transform; both phones share the save, so the
-// vehicle exists on both ends under the same UniqueIdentifier guid and only its pose travels.
+// Whoever pilots a Seamoth/Prawn publishes its transform. A newly built Seamoth also carries
+// the original UniqueIdentifier so the other phone can create its own driveable instance.
 // The receiver teleports its local copy and parks it kinematic while driven, then restores it
 // on exit/timeout. The pilot's avatar hides (it sits inside).
 // ---------------------------------------------------------------------------
+constexpr size_t kVehicleObjectIdSize = 128;
 struct VehicleState {
     uint32_t pilot;  // sender id (who drives)
     uint8_t guid[16];
     char classId[16];  // prefab class id ("seamoth"/"cyclops"/"prawn"); clones when guid misses
+    char object_id[kVehicleObjectIdSize];
     float x, y, z;
     float yaw, pitch, roll;  // euler degrees, Unity order
     uint32_t sequence;
@@ -333,6 +361,7 @@ enum WorldEventKind : uint8_t {
     kWorldEventLockerContents = 6,
     kWorldEventFishPickup = 7,
     kWorldEventSharedProgress = 8,
+    kWorldEventLockerMotion = 9,
 };
 
 // build_flags bits for the build kinds. complete/isInside/forceUpright/rotatable/attached
