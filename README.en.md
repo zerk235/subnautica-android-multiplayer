@@ -2,33 +2,19 @@
 
 Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://github.com/zerk235).
 
-[Русский README](README.md)
+**[Download APK for Android · 0.3.13-installer-fix-test](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-installer-fix-test/snmp-installer-fix-test.apk)** · [Release notes and SHA‑256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-fix-test)
 
-> **Public demo 0.3.13.** Play together on a local network: either phone can host, the guest receives the saved world automatically, and players can build supported base pieces and exchange items through a floor Locker. A HUD marker shows your partner and their distance. Install directly on Android without a PC or root. Use a separate world and backups for your first tests. See the [tested features and limitations](docs/COMPATIBILITY.md).
+**Pre-release for testing.** This build includes an in-game lobby and fixes for Shizuku access, world restoration and diagnostics.
 
-This repository contains mod/installer source and tests, not the game or a prepatched game APK. See the Russian [installer guide](docs/INSTALLER.md).
+[Русский README](README.md) · [Installation guide (Russian)](docs/INSTALLER.md) · [How to join (Russian)](docs/PLAYING.md)
 
 ## Download and install
 
-**[Download installer 0.3.13 — APK](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-installer-preview/snmp-installer-preview.apk)** · [Release and SHA256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-preview)
+1. Download the APK above and install SN Multiplayer Installer. If the signing certificate matches, update the app in place to keep your local signing key and backups.
+2. Save your world and return to the game menu. In the installer, select **“Подготовить игру” (Prepare game)** and then **“Установить подготовленный мод” (Install prepared mod)**.
+3. Repeat on both phones. Joining requires matching mod builds on protocol **45**.
 
-**0.3.13 adds experimental Bladderfish sync and improves guest fish pickup.** The installer supports game resources stored inside base.apk.
-[Release notes and limitations (Russian)](docs/releases/0.3.13-installer-preview.md).
-
-Update the installer over the existing app and keep its data and signing key.
-Save and exit to the game menu, then **Prepare mod → Install prepared mod on both
-phones**. Updating only the installer does not update the game mod. Protocol is
-**37**; matching builds are required. Automatic recovery of an unfinished transfer
-after a process crash is not implemented. Use a separate test world and ordinary
-resources first. [Locker contents](docs/LOCKER_CONTENTS.md) · [Diagnostics](docs/DIAGNOSTICS.md).
-
-**November 5 update:** the installer now has **“Запустить хостом” (Launch as host)**
-and **“Подключиться гостем” (Join as guest)**. A non-root phone can host a previously
-downloaded world. Autoload after switching roles retains the former host's original save.
-When upgrading from 0.2, update SN Multiplayer Installer over the existing app,
-save your game and return to its main menu, then run **Prepare mod → Install
-prepared mod** on both phones. Keep the installer's data: it holds your update key.
-[Host-selection history in 0.3](docs/releases/0.3.0-installer-preview.md).
+[Previous demo on protocol 37](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-preview)
 
 Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
 its resources. The installer runs on the phone without a PC or root and does not
@@ -56,14 +42,16 @@ and the local key needed for future updates. Full steps are in the
 ## Current scope
 
 - Two Android phones on the same Wi-Fi network or hotspot.
-- Explicit host/guest buttons in the installer; no root or Shizuku is needed to choose a role. The role persists between launches and changes only in the main menu.
+- In-game lobby with room selection and ready status. Either phone can host without root.
 - Host discovery, full supported saved-world transfer including `CellsCache`, and guest autoload from the main menu. No PC is needed during a join.
 - Remote player rendering, head visibility, indoor lighting and Builder grip fixes.
 - Live construction/deconstruction of supported base pieces attached to an existing shared base.
 
 Tested game version: **1.22.83315**, Android **arm64-v8a**. Both phones need matching game and mod builds. Other game versions and larger sessions are unverified.
 
-Choose **Launch as host** on one phone, load and save a world, then choose **Join as guest** on the other and leave it in the main menu. Save and return to the main menu on both phones before switching roles. Construction and demolition of foundations and supported base pieces attached to new or existing bases have passed live tests. Floor Locker construction, placement, empty storage and demolition from host to guest passed in 0.3.3. Version 0.3.4 also passed two guest-to-host build/remove cycles, removal of a saved locker after a full restart, and a locker in a new standalone room. Version 0.3.5 shares floor Locker contents, with tested resource transfers, battery charge and saved contents after restart. Automatic crash recovery and guest personal inventory persistence remain limitations; see the release notes. Fish, complete ecosystem simulation, all held items and all animations are not synchronized. Remote flashlight on/off was tested; Seaglide placement still needs work. Internet matchmaking is not implemented.
+Connect both phones to the same Wi-Fi network. Open **“Совместная игра” (Multiplayer)** in the game menu. The host creates a room and the guest selects it. When both players are ready, the host opens and saves a world. The guest waits in the lobby for the transfer and automatic load.
+
+Tested base pieces and floor Lockers are listed in the compatibility guide. Sync for selected fish and Stalkers is experimental. Full ecosystem, inventory, vehicle and animation sync remain limited.
 
 See the Russian [play guide](docs/PLAYING.md), [compatibility matrix](docs/COMPATIBILITY.md), [build instructions](docs/BUILDING.md) and [demo roadmap](docs/ROADMAP.md).
 
