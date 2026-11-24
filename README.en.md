@@ -1,62 +1,75 @@
-# Subnautica Android Multiplayer
+<div align="center">
+  <h1>Subnautica Android Multiplayer</h1>
+  <p><strong>Co-op for Subnautica on Android</strong></p>
+  <p>Two players on the same network, sharing a world and building a base together.</p>
+  <p>
+    <a href="https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-installer-fix-test/snmp-installer-fix-test.apk"><strong>Download APK for Android</strong></a> ·
+    <a href="https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-fix-test">Release notes and SHA-256</a> ·
+    <a href="README.md">Русский</a>
+  </p>
+  <img src="assets/subnautica_multiplayer_preview.gif" alt="Players meet at an underwater base and build in a shared world" width="820">
+</div>
 
-Experimental LAN co-op mod for **Subnautica on Android** by [zerk235](https://github.com/zerk235).
+## Quick start
 
-**[Download APK for Android · 0.3.13-installer-fix-test](https://github.com/zerk235/subnautica-android-multiplayer/releases/download/v0.3.13-installer-fix-test/snmp-installer-fix-test.apk)** · [Release notes and SHA‑256](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-fix-test)
+| Android | Game version | Connection |
+| --- | --- | --- |
+| 10+ · ARM64 | Subnautica **1.22.83315** | 2 players · same Wi-Fi network or hotspot |
 
-**Pre-release for testing.** This build includes an in-game lobby and fixes for Shizuku access, world restoration and diagnostics.
+**Public demo 0.3.13** includes an in-game lobby and fixes for Shizuku access, world restoration and diagnostics. Both phones need the same mod build on protocol **45**.
 
-[Русский README](README.md) · [Installation guide (Russian)](docs/INSTALLER.md) · [How to join (Russian)](docs/PLAYING.md)
+1. **Install the patcher.** Download the APK above. Save your game and return to the main menu. In the patcher, select **Prepare game** and then **Install prepared mod**.
+2. **Create a room.** Connect both phones to the same network. Open **Совместная игра** (Multiplayer) in the game menu. The host creates a room, the guest selects it, and both players press **Готов** (Ready).
+3. **Open a world.** The host opens and saves their world. The mod transfers the save and loads it for the guest.
 
-## Download and install
+[Installation](docs/INSTALLER.md) · [Joining a room](docs/PLAYING.md) · [Compatibility](docs/COMPATIBILITY.md) · [Diagnostics](docs/DIAGNOSTICS.md)
 
-1. Download the APK above and install SN Multiplayer Installer. If the signing certificate matches, update the app in place to keep your local signing key and backups.
-2. Save your world and return to the game menu. In the installer, select **“Подготовить игру” (Prepare game)** and then **“Установить подготовленный мод” (Install prepared mod)**.
-3. Repeat on both phones. Joining requires matching mod builds on protocol **45**.
+## What you can do together
 
-[Previous demo on protocol 37](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-preview)
+| Feature | Available in the demo |
+| --- | --- |
+| **Join a friend** | Local room discovery, lobby and ready status in the main menu. Either phone can host without root. |
+| **Load the host's world** | Supported save transfer including `CellsCache`, guest autoload and rejoining. |
+| **See your teammate** | Remote player model and a marker with a label and distance. Includes head visibility, indoor lighting and Builder grip fixes. |
+| **Build a base** | Construction and deconstruction of supported corridors, hatches, windows, foundations, ladders, reinforcements, rooms and domes. |
+| **Share resources** | Floor Locker with two-way item transfers, verified battery charge and persistent contents. [Details](docs/LOCKER_CONTENTS.md) |
 
-Requires Android 10+, ARM64 and your own installed Subnautica **1.22.83315** with
-its resources. The installer runs on the phone without a PC or root and does not
-contain or download the game.
+<details>
+<summary><strong>Installation, signing and backups</strong></summary>
 
-**“Подготовить мод” (Prepare mod)** copies the installed game APKs into the
-installer's own storage, patches, signs and verifies them. It does not install
-the result or uninstall the game. For a first signing-key change, when Shizuku
-access is already authorized, preparation also creates a verified world backup.
-Without Shizuku, APK preparation still works but world backup is unavailable.
-Private game preferences under `/data/user/...` are not included.
+You need your own installed copy of Subnautica and its resources. The patcher runs on the phone without a PC or root. The installer APK is distributed separately from the game.
 
-For a first signing-key change: connect Shizuku, create a world backup, prepare
-the mod, use **“Удалить старую игру” (Remove old game)**, confirm Android's prompt,
-install the prepared mod, then **“Восстановить миры” (Restore worlds)**. The remove
-button checks the APKs, backup integrity and current saves before opening the
-system prompt. Archives can also be exported and imported through the system picker.
-See the [backup and Shizuku guide](docs/INSTALLER_BACKUPS.md). The app includes
-Shizuku help and the verified GT8 workaround for the limited-ADB warning.
+If the signing certificate matches, update the installer in place and keep its app data. It stores the local signing key and backups. Preparing the mod creates a separate copy of the APKs and resources, then patches, signs and verifies them.
 
-**Keep SN Multiplayer Installer and its app data**: they hold the prepared files
-and the local key needed for future updates. Full steps are in the
-[installer guide](docs/INSTALLER.md).
+For a first signing-key change, connect Shizuku and make a verified world backup before replacing the game. Android shows a system prompt for removal. Then install the prepared mod and restore your worlds. The backup excludes private game preferences under `/data/user/...`.
 
-## Current scope
+The installer includes Shizuku help and the verified GT8 workaround for the limited-ADB warning. [Installer guide](docs/INSTALLER.md) · [Backups and Shizuku](docs/INSTALLER_BACKUPS.md) · [Previous demo, protocol 37](https://github.com/zerk235/subnautica-android-multiplayer/releases/tag/v0.3.13-installer-preview)
 
-- Two Android phones on the same Wi-Fi network or hotspot.
-- In-game lobby with room selection and ready status. Either phone can host without root.
-- Host discovery, full supported saved-world transfer including `CellsCache`, and guest autoload from the main menu. No PC is needed during a join.
-- Remote player rendering, head visibility, indoor lighting and Builder grip fixes.
-- Live construction/deconstruction of supported base pieces attached to an existing shared base.
+</details>
 
-Tested game version: **1.22.83315**, Android **arm64-v8a**. Both phones need matching game and mod builds. Other game versions and larger sessions are unverified.
+<details>
+<summary><strong>Demo limitations</strong></summary>
 
-Connect both phones to the same Wi-Fi network. Open **“Совместная игра” (Multiplayer)** in the game menu. The host creates a room and the guest selects it. When both players are ready, the host opens and saves a world. The guest waits in the lobby for the transfer and automatic load.
+- The public build supports two phones on the same local network.
+- New standalone bases were tested with foundations and multipurpose rooms. Other types and more complex combinations are still being tested.
+- Selected fish and Stalker sync is experimental. Vehicle, animation, personal inventory and ecosystem sync is partial.
+- Recovery from an interrupted Locker transfer and a full play test of changing worlds without restarting are still in progress.
 
-Tested base pieces and floor Lockers are listed in the compatibility guide. Sync for selected fish and Stalkers is experimental. Full ecosystem, inventory, vehicle and animation sync remain limited.
+[Compatibility matrix](docs/COMPATIBILITY.md) · [Demo roadmap](docs/ROADMAP.md)
 
-See the Russian [play guide](docs/PLAYING.md), [compatibility matrix](docs/COMPATIBILITY.md), [build instructions](docs/BUILDING.md) and [demo roadmap](docs/ROADMAP.md).
+</details>
 
-The developer patch tool creates an **unsigned** APK from a local game APK; it does not sign or install it. Signing and split-package compatibility must be handled separately. Do not uninstall the game to resolve a signing mismatch without first backing up your saves.
+## Development
 
-The Android installer generates a local non-exportable signing key, prepares a signed package on the phone and blocks replacement when the installed game's certificate differs. It never uninstalls the game automatically. Keep the installer and its app data to retain the signing key for future updates.
+| Directory | Contents |
+| --- | --- |
+| [`modloader/`](modloader/) | C++17 native mod and ShadowHook |
+| [`installer/`](installer/) | Android installer |
+| [`tests/`](tests/) | Save transfer, autoload, building and avatar tests |
+| [`tools/`](tools/) | Builds, desktop APK patching and test tools |
 
-No open-source license has been selected for project-owned code; see [LICENSE.md](LICENSE.md). Third-party components retain their own licenses. This unofficial project is not affiliated with the game's developers.
+[Build instructions](docs/BUILDING.md) · [Contributing](CONTRIBUTING.md) · [Project license](LICENSE.md) · [Third-party licenses](THIRD_PARTY_NOTICES.md)
+
+The desktop patcher creates an unsigned APK from your local copy of the game. Game APKs, libraries, assets, saves and signing keys are kept outside the repository. Project-owned code currently has no open-source license.
+
+An unofficial community project by [zerk235](https://github.com/zerk235). Subnautica and its assets belong to their respective owners.
